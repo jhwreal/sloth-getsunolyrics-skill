@@ -18,13 +18,13 @@ After every click, menu change, navigation, or download action, inspect fresh ap
 2. Copy the full lyrics exactly as displayed, including repeated lines, case, punctuation, and section headings.
 3. Save the untimed text as UTF-8 `lyrics.txt` in the song's working directory.
 4. Do not add timestamps and do not use an existing reviewed CSV/TS to fill or reorder the lyrics.
-5. Re-open or scroll the panel once to verify that the first line, last line, and cue count were not truncated by a collapsed panel.
+5. Re-open or scroll the panel once to verify that the first line, last line, and repeated sections were not truncated by a collapsed panel. Do not use page-wide Select All, which can mix titles, comments, or recommendations into the lyrics.
 
 ## 3. Download the lyric MP4
 
 1. Open the main song action menu associated with the detail header, not a recommendation or player row.
 2. Open or hover over `Download` and select `Video`.
-3. Wait for Chrome to complete the `.mp4` download. Do not treat a partial download as complete.
+3. Record the download start time and wait for Chrome to complete the new `.mp4`. Do not reuse an older same-named file or treat a partial download as complete.
 4. Move or copy the MP4 into the song working directory without overwriting unrelated files.
 
 ## 4. Create and download the vocal stem
@@ -45,5 +45,7 @@ Use media inspection to confirm:
 - duration difference is no more than `max(500 ms, 0.5%)`;
 - both begin at the same song time zero and neither was cropped;
 - the filenames and recorded source UUID identify the selected song.
+
+Run the local media preflight before OCR. If it reports missing streams or a duration mismatch, return to the same song UUID and download again; do not hide the mismatch with a manual offset.
 
 If the Suno labels move or change, reason from the visible interface and accessible names instead of guessing old coordinates. Do not use undocumented Suno APIs or derive hidden media URLs.

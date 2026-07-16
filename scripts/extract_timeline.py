@@ -19,9 +19,13 @@ import sys
 import tempfile
 import wave
 
+from media_utils import require_command, validate_media_pair
+
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 VISION_SOURCE = SKILL_ROOT / "scripts" / "vision_ocr.swift"
+PIPELINE_SCHEMA_VERSION = 2
+OCR_CACHE_VERSION = 2
 SECTION_RE = re.compile(r"^[\[［（(]([^\]］）)]+)[\]］）)]\s*")
 SECTION_ONLY_RE = re.compile(r"^[\[［（(]([^\]］）)]+)[\]］）)]\s*$")
 
@@ -30,42 +34,82 @@ def run(command: list[str], *, stdout=None) -> None:
     subprocess.run(command, check=True, stdout=stdout)
 
 
-def require_command(name: str) -> str:
-    found = shutil.which(name)
-    if not found:
-        raise SystemExit(f"missing required command: {name}")
-    return found
+def write_text_atomic(path: Path, content: str, *, encoding: str = "utf-8") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(content, encoding=encoding)
+    temporary.replace(path)
 
 
-def probe_duration(path: Path) -> float:
+def write_json_atomic(path: Path, payload: dict) -> None:
+    write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+
+def read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def pipeline_fingerprint() -> str:
+    digest = hashlib.sha256()
+    for path in [Path(__file__).resolve(), VISION_SOURCE.resolve()]:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def macos_sdk_candidates() -> list[Path | None]:
+    """Return the default SDK followed by installed SDKs, newest first."""
+    candidates: list[Path | None] = [None]
     result = subprocess.run(
-        [
-            require_command("ffprobe"),
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=nw=1:nk=1",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
+        ["xcode-select", "-p"], capture_output=True, text=True, check=False
     )
-    return float(result.stdout.strip())
+    if result.returncode != 0:
+        return candidates
+    developer = Path(result.stdout.strip())
+    roots = [
+        developer / "SDKs",
+        developer / "Platforms" / "MacOSX.platform" / "Developer" / "SDKs",
+    ]
+    discovered = []
+    for root in roots:
+        if root.is_dir():
+            discovered.extend(path for path in root.glob("MacOSX*.sdk") if path.is_dir())
+
+    def version_key(path: Path) -> tuple[int, ...]:
+        numbers = re.findall(r"\d+", path.stem)
+        return tuple(map(int, numbers)) if numbers else (0,)
+
+    seen = set()
+    for path in sorted(discovered, key=version_key, reverse=True):
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            candidates.append(path)
+    return candidates
 
 
 def compile_vision_scanner(work: Path) -> Path:
     swiftc = require_command("swiftc")
     binary = work / "vision-ocr"
+    metadata_path = work / "vision-ocr.build.json"
     module_cache = work / "clang-module-cache"
     module_cache.mkdir(parents=True, exist_ok=True)
-    command = [swiftc]
-    legacy_sdk = Path("/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk")
-    if legacy_sdk.exists():
-        command += ["-sdk", str(legacy_sdk)]
-    command += [
+    version = subprocess.run(
+        [swiftc, "--version"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    build_identity = {
+        "vision_source_sha256": sha256(VISION_SOURCE),
+        "swiftc_version": version,
+    }
+    existing_build = read_json(metadata_path) or {}
+    if binary.is_file() and all(
+        existing_build.get(key) == value for key, value in build_identity.items()
+    ):
+        return binary
+    command_tail = [
         str(VISION_SOURCE),
         "-o",
         str(binary),
@@ -78,12 +122,68 @@ def compile_vision_scanner(work: Path) -> Path:
     ]
     env = os.environ.copy()
     env["CLANG_MODULE_CACHE_PATH"] = str(module_cache)
-    subprocess.run(command, check=True, env=env)
-    return binary
+    failures = []
+    for sdk in macos_sdk_candidates():
+        binary.unlink(missing_ok=True)
+        command = [swiftc]
+        if sdk is not None:
+            command += ["-sdk", str(sdk)]
+        command += command_tail
+        result = subprocess.run(command, capture_output=True, text=True, env=env)
+        if result.returncode == 0 and binary.is_file():
+            write_json_atomic(
+                metadata_path,
+                {
+                    **build_identity,
+                    "sdk": sdk.name if sdk is not None else "default",
+                },
+            )
+            return binary
+        failures.append(
+            f"{sdk.name if sdk is not None else 'default'}: "
+            + (result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "failed")
+        )
+    raise SystemExit("could not compile Vision OCR scanner; " + " | ".join(failures))
 
 
 def extract_ocr(video: Path, work: Path, interval: float, language: str) -> list[dict]:
     frames = work / "frames"
+    output = work / "ocr.jsonl"
+    cache_path = work / "ocr.cache.json"
+    cache_key = {
+        "cache_version": OCR_CACHE_VERSION,
+        "video_sha256": sha256(video),
+        "interval_ms": round(interval * 1000),
+        "language": language,
+        "vision_source_sha256": sha256(VISION_SOURCE),
+    }
+    cache_record = read_json(cache_path) or {}
+    cache_identity_matches = all(
+        cache_record.get(key) == value for key, value in cache_key.items()
+    )
+    if output.is_file() and cache_identity_matches:
+        try:
+            cached = [
+                json.loads(line)
+                for line in output.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        except json.JSONDecodeError:
+            cached = []
+        cache_content_matches = all(
+            [
+                cache_record.get("frame_count") == len(cached),
+                cache_record.get("ocr_sha256") == sha256(output),
+            ]
+        )
+        if cached and cache_content_matches and any(item.get("observations") for item in cached):
+            print(f"      reusing {len(cached)} cached OCR frames", file=sys.stderr)
+            return cached
+
+    # A reused work directory may contain frames from a different or longer video.
+    # Remove the complete directory before fresh extraction to prevent contamination.
+    if frames.exists():
+        shutil.rmtree(frames)
     frames.mkdir(parents=True, exist_ok=True)
     fps = 1.0 / interval
     run(
@@ -105,10 +205,10 @@ def extract_ocr(video: Path, work: Path, interval: float, language: str) -> list
         ]
     )
     scanner = compile_vision_scanner(work)
-    output = work / "ocr.jsonl"
+    temporary_output = work / ".ocr.jsonl.tmp"
     languages = "zh-Hans,en-US" if language in {"auto", "zh"} else "en-US"
     scale = round(interval * 1000)
-    with output.open("wb") as stream:
+    with temporary_output.open("wb") as stream:
         run(
             [
                 str(scanner),
@@ -121,12 +221,26 @@ def extract_ocr(video: Path, work: Path, interval: float, language: str) -> list
             ],
             stdout=stream,
         )
-    results = [json.loads(line) for line in output.read_text().splitlines() if line.strip()]
+    results = [
+        json.loads(line)
+        for line in temporary_output.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     if not results or not any(item.get("observations") for item in results):
+        temporary_output.unlink(missing_ok=True)
         raise SystemExit(
             "OCR returned no text. On macOS, run this command outside an application sandbox "
             "or allow access to the Vision framework."
         )
+    temporary_output.replace(output)
+    write_json_atomic(
+        cache_path,
+        {
+            **cache_key,
+            "frame_count": len(results),
+            "ocr_sha256": sha256(output),
+        },
+    )
     return results
 
 
@@ -181,8 +295,39 @@ def text_similarity(left: str, right: str) -> float:
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-def align_lyrics_to_video(lyrics: list[dict], video_cues: list[dict], interval_ms: int) -> list[dict]:
+def filter_video_cues_for_lyrics(lyrics: list[dict], video_cues: list[dict]) -> list[dict]:
+    """Drop titles and decorations using canonical lyrics instead of song-specific rules."""
+    lyric_texts = [cue["text"] for cue in lyrics]
+    relevant = [
+        cue
+        for cue in video_cues
+        if max((text_similarity(cue["text"], text) for text in lyric_texts), default=0.0) >= 0.5
+    ]
+    if not relevant:
+        raise SystemExit("none of the video OCR anchors resemble the supplied lyrics")
+    return relevant
+
+
+def estimate_line_spacing_ms(video_cues: list[dict], interval_ms: int) -> int:
+    deltas = [
+        int(right["video_start_ms"]) - int(left["video_start_ms"])
+        for left, right in zip(video_cues, video_cues[1:])
+        if interval_ms <= int(right["video_start_ms"]) - int(left["video_start_ms"]) <= 15_000
+    ]
+    if not deltas:
+        return max(2_000, interval_ms * 4)
+    return max(interval_ms, round(statistics.median(deltas)))
+
+
+def align_lyrics_to_video(
+    lyrics: list[dict],
+    video_cues: list[dict],
+    interval_ms: int,
+    *,
+    duration_ms: int | None = None,
+) -> list[dict]:
     """Order-align canonical lyric lines to noisy OCR cues without changing lyric text."""
+    video_cues = filter_video_cues_for_lyrics(lyrics, video_cues)
     lyric_count = len(lyrics)
     video_count = len(video_cues)
     gap_score = -0.55
@@ -198,7 +343,9 @@ def align_lyrics_to_video(lyrics: list[dict], video_cues: list[dict], interval_m
         for j in range(1, video_count + 1):
             similarity = text_similarity(lyrics[i - 1]["text"], video_cues[j - 1]["text"])
             options = {
-                "match": scores[i - 1][j - 1] + (2.0 * similarity - 1.0),
+                # A tiny deterministic position penalty resolves equal duplicate matches
+                # toward the earliest viable video anchor without overpowering text quality.
+                "match": scores[i - 1][j - 1] + (2.0 * similarity - 1.0) - j * 1e-6,
                 "lyric": scores[i - 1][j] + gap_score,
                 "video": scores[i][j - 1] + gap_score,
             }
@@ -222,6 +369,10 @@ def align_lyrics_to_video(lyrics: list[dict], video_cues: list[dict], interval_m
     aligned = []
     for lyric_index, lyric in enumerate(lyrics):
         video_index = mapping.get(lyric_index)
+        if video_index is not None:
+            candidate_similarity = text_similarity(lyric["text"], video_cues[video_index]["text"])
+            if candidate_similarity < 0.5:
+                video_index = None
         if video_index is not None:
             video = video_cues[video_index]
             similarity = text_similarity(lyric["text"], video["text"])
@@ -255,6 +406,7 @@ def align_lyrics_to_video(lyrics: list[dict], video_cues: list[dict], interval_m
     matched = [index for index, cue in enumerate(aligned) if cue["video_start_ms"] is not None]
     if not matched:
         raise SystemExit("none of the supplied lyric lines could be aligned to the video OCR")
+    typical_spacing = estimate_line_spacing_ms(video_cues, interval_ms)
     for index, cue in enumerate(aligned):
         if cue["video_start_ms"] is not None:
             continue
@@ -266,12 +418,27 @@ def align_lyrics_to_video(lyrics: list[dict], video_cues: list[dict], interval_m
             fraction = (index - left) / (right - left)
             cue["video_start_ms"] = round(left_time + (right_time - left_time) * fraction)
         elif left is not None:
-            cue["video_start_ms"] = aligned[left]["video_start_ms"] + interval_ms * (index - left)
+            spacing = typical_spacing
+            if duration_ms is not None:
+                missing_after = len(aligned) - left - 1
+                available = max(1, duration_ms - aligned[left]["video_start_ms"])
+                spacing = min(spacing, max(1, available // (missing_after + 1)))
+            cue["video_start_ms"] = aligned[left]["video_start_ms"] + spacing * (index - left)
         else:
-            cue["video_start_ms"] = max(0, aligned[right]["video_start_ms"] - interval_ms * (right - index))
+            available = max(1, aligned[right]["video_start_ms"])
+            spacing = min(typical_spacing, max(1, available // (right + 1)))
+            cue["video_start_ms"] = aligned[right]["video_start_ms"] - spacing * (right - index)
     previous = -1
-    for cue in aligned:
-        cue["video_start_ms"] = max(previous + 1, int(cue["video_start_ms"]))
+    for index, cue in enumerate(aligned):
+        candidate = max(previous + 1, int(cue["video_start_ms"]))
+        if duration_ms is not None:
+            maximum = duration_ms - (len(aligned) - index)
+            if candidate > maximum:
+                candidate = maximum
+                cue["flags"].append("video-anchor-clamped-to-media")
+            if candidate <= previous:
+                raise SystemExit("too many lyric lines to fit within the media duration")
+        cue["video_start_ms"] = candidate
         previous = cue["video_start_ms"]
     return aligned
 
@@ -284,9 +451,10 @@ def same_text(left: str, right: str) -> bool:
     a, b = normalize_text(left), normalize_text(right)
     if not a or not b:
         return False
-    if min(len(a), len(b)) >= 4 and (a in b or b in a):
+    coverage = min(len(a), len(b)) / max(len(a), len(b))
+    if min(len(a), len(b)) >= 4 and coverage >= 0.55 and (a in b or b in a):
         return True
-    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.72
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.86
 
 
 def clean_candidate(text: str) -> tuple[str, str | None]:
@@ -319,8 +487,6 @@ def frame_candidate(frame: dict) -> dict | None:
         if not 0.27 <= observation["y"] <= 0.48:
             continue
         if "MADE WITH SUNO" in upper or text.casefold().startswith("by @"):
-            continue
-        if upper.startswith("FIRESEED") or text.startswith("音乐盒星光"):
             continue
         observations.append(observation)
     if not observations:
@@ -394,8 +560,13 @@ def build_video_cues(frames: list[dict], interval_ms: int) -> list[dict]:
         compact.append(cue)
     # A wrapped continuation can briefly occupy the active anchor during a scroll.
     merged: list[dict] = []
+    glitch_window_ms = max(1500, interval_ms * 3)
     for cue in compact:
-        if any(same_text(cue["text"], prior["text"]) for prior in merged[-3:]):
+        if any(
+            same_text(cue["text"], prior["text"])
+            and cue["video_start_ms"] - prior["video_start_ms"] <= glitch_window_ms
+            for prior in merged[-3:]
+        ):
             continue
         short = len(normalize_text(cue["text"])) <= 12
         if (
@@ -452,6 +623,8 @@ def vocal_envelope(vocals: Path, work: Path) -> tuple[list[float], int, float]:
         samples.byteswap()
     frame_ms = 20
     frame_size = sample_rate * frame_ms // 1000
+    if len(samples) < frame_size:
+        raise SystemExit("vocal stem is too short to analyze")
     db: list[float] = []
     for offset in range(0, len(samples) - frame_size + 1, frame_size):
         total = sum(value * value for value in samples[offset : offset + frame_size])
@@ -459,6 +632,10 @@ def vocal_envelope(vocals: Path, work: Path) -> tuple[list[float], int, float]:
         db.append(20 * math.log10(max(rms, 1e-6)))
     finite_floor = percentile([value for value in db if value > -100], 0.1)
     threshold = min(-34.0, max(-48.0, finite_floor + 10.0))
+    if not any(value >= threshold for value in db):
+        raise SystemExit(
+            "no vocal activity was detected in the supplied stem; download the full-song Lead Vocal"
+        )
     return db, frame_ms, threshold
 
 
@@ -496,6 +673,10 @@ def vocal_onsets(db: list[float], frame_ms: int, threshold: float) -> list[int]:
 
 
 def calibrate(cues: list[dict], db: list[float], frame_ms: int, threshold: float, duration_ms: int) -> list[dict]:
+    if not cues:
+        raise SystemExit("no aligned lyric cues to calibrate")
+    if not db:
+        raise SystemExit("vocal activity envelope is empty")
     onsets = vocal_onsets(db, frame_ms, threshold)
     calibrated = []
     for index, cue in enumerate(cues):
@@ -515,8 +696,11 @@ def calibrate(cues: list[dict], db: list[float], frame_ms: int, threshold: float
             chosen = min(forward, default=min(candidates, key=lambda item: abs(item - video_start)))
         else:
             chosen = video_start
-        if calibrated and chosen <= calibrated[-1]["start_ms"]:
-            chosen = max(video_start, calibrated[-1]["start_ms"] + 1)
+        minimum = calibrated[-1]["start_ms"] + 1 if calibrated else 0
+        maximum = duration_ms - (len(cues) - index)
+        chosen = min(maximum, max(minimum, chosen))
+        if chosen < minimum:
+            raise SystemExit("calibrated lyric starts cannot fit within the media duration")
         frame_index = min(len(db) - 1, max(0, chosen // frame_ms))
         flags = list(cue.get("flags") or [])
         if not video_is_active:
@@ -543,10 +727,32 @@ def calibrate(cues: list[dict], db: list[float], frame_ms: int, threshold: float
         )
     for index, cue in enumerate(calibrated):
         if index + 1 < len(calibrated):
-            cue["end_ms"] = max(cue["start_ms"] + 1, calibrated[index + 1]["start_ms"])
+            next_start = calibrated[index + 1]["start_ms"]
+            first_frame = max(0, cue["start_ms"] // frame_ms)
+            last_frame = min(len(db) - 1, max(first_frame, (next_start - 1) // frame_ms))
+            last_active = max(
+                (frame for frame in range(first_frame, last_frame + 1) if db[frame] >= threshold),
+                default=None,
+            )
+            vocal_end = (last_active + 1) * frame_ms if last_active is not None else next_start
+            if cue["start_ms"] < vocal_end <= next_start - 120:
+                cue["end_ms"] = vocal_end
+                cue["end_timing_source"] = "vocal_offset"
+            else:
+                cue["end_ms"] = next_start
+                cue["end_timing_source"] = "next_line_start_fallback"
         else:
-            last_active = max((i for i, value in enumerate(db) if value >= threshold), default=len(db) - 1) * frame_ms
-            cue["end_ms"] = min(duration_ms, max(cue["start_ms"] + 1, last_active + 120))
+            last_active = max(
+                (i for i, value in enumerate(db) if value >= threshold), default=None
+            )
+            if last_active is None:
+                cue["end_ms"] = duration_ms
+                cue["end_timing_source"] = "media_duration_fallback"
+            else:
+                cue["end_ms"] = min(
+                    duration_ms, max(cue["start_ms"] + 1, (last_active + 1) * frame_ms)
+                )
+                cue["end_timing_source"] = "vocal_offset"
     return calibrated
 
 
@@ -567,6 +773,14 @@ def main() -> None:
     if args.interval < 0.25 or args.interval > 1.0:
         raise SystemExit("--interval must be between 0.25 and 1.0 seconds")
 
+    video_path = args.video.resolve()
+    vocals_path = args.vocals.resolve()
+    lyrics_path = args.lyrics.resolve()
+    print("[1/5] Validate media streams and durations", file=sys.stderr)
+    video_info, vocal_info = validate_media_pair(video_path, vocals_path)
+    duration_ms = min(video_info["duration_ms"], vocal_info["duration_ms"])
+    lyrics = parse_lyrics(lyrics_path)
+
     temporary = None
     if args.work_dir:
         work = args.work_dir.resolve()
@@ -574,35 +788,53 @@ def main() -> None:
     else:
         temporary = tempfile.TemporaryDirectory(prefix="sloth-getsunolyrics-")
         work = Path(temporary.name)
-    print(f"[1/5] OCR video frames every {args.interval:.2f}s", file=sys.stderr)
-    frames = extract_ocr(args.video.resolve(), work, args.interval, args.language)
-    print("[2/5] Build video anchors and align supplied Suno lyrics", file=sys.stderr)
-    video_cues = build_video_cues(frames, round(args.interval * 1000))
-    lyrics = parse_lyrics(args.lyrics.resolve())
-    aligned_cues = align_lyrics_to_video(lyrics, video_cues, round(args.interval * 1000))
+    print(f"[2/5] OCR video frames every {args.interval:.2f}s", file=sys.stderr)
+    frames = extract_ocr(video_path, work, args.interval, args.language)
+    print("[3/5] Build video anchors and align supplied Suno lyrics", file=sys.stderr)
+    raw_video_cues = build_video_cues(frames, round(args.interval * 1000))
+    video_cues = filter_video_cues_for_lyrics(lyrics, raw_video_cues)
+    aligned_cues = align_lyrics_to_video(
+        lyrics,
+        video_cues,
+        round(args.interval * 1000),
+        duration_ms=duration_ms,
+    )
     print(
         f"      aligned {len(aligned_cues)} lyric lines to {len(video_cues)} video anchors",
         file=sys.stderr,
     )
-    print("[3/5] Analyze isolated-vocal activity and calibrate boundaries", file=sys.stderr)
-    db, frame_ms, threshold = vocal_envelope(args.vocals.resolve(), work)
-    duration_ms = round(probe_duration(args.vocals.resolve()) * 1000)
+    print("[4/5] Analyze isolated-vocal activity and calibrate boundaries", file=sys.stderr)
+    db, frame_ms, threshold = vocal_envelope(vocals_path, work)
     timeline = calibrate(aligned_cues, db, frame_ms, threshold, duration_ms)
+    confirmed_count = sum(
+        cue["text_source"] == "suno_lyrics_confirmed_by_video" for cue in timeline
+    )
     payload = {
-        "schema_version": 1,
-        "video": str(args.video.resolve()),
-        "video_sha256": sha256(args.video.resolve()),
-        "vocals": str(args.vocals.resolve()),
-        "vocals_sha256": sha256(args.vocals.resolve()),
-        "lyrics": str(args.lyrics.resolve()),
-        "lyrics_sha256": sha256(args.lyrics.resolve()),
+        "schema_version": PIPELINE_SCHEMA_VERSION,
+        "pipeline_fingerprint": pipeline_fingerprint(),
+        "video": video_path.name,
+        "video_sha256": sha256(video_path),
+        "video_duration_ms": video_info["duration_ms"],
+        "vocals": vocals_path.name,
+        "vocals_sha256": sha256(vocals_path),
+        "vocals_duration_ms": vocal_info["duration_ms"],
+        "lyrics": lyrics_path.name,
+        "lyrics_sha256": sha256(lyrics_path),
         "media_duration_ms": duration_ms,
         "ocr_interval_ms": round(args.interval * 1000),
+        "ocr_language": args.language,
         "vocal_threshold_db": round(threshold, 2),
+        "alignment_summary": {
+            "lyrics_count": len(lyrics),
+            "video_anchor_count": len(video_cues),
+            "raw_video_anchor_count": len(raw_video_cues),
+            "confirmed_count": confirmed_count,
+            "interpolated_count": len(timeline) - confirmed_count,
+            "confirmed_ratio": round(confirmed_count / len(timeline), 4),
+        },
         "cues": timeline,
     }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    write_json_atomic(args.output, payload)
     print(f"[5/5] Wrote {args.output} ({len(timeline)} cues)", file=sys.stderr)
     if args.keep_work and temporary:
         retained = args.output.with_suffix(".work")

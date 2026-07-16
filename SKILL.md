@@ -43,10 +43,10 @@ Keep downloads in the user's lyric-processing workspace, not inside this Skill r
 
 ## Generate the timeline
 
-After acquisition, run:
+Resolve the absolute directory containing this `SKILL.md`; never assume the task's current directory is the Skill directory. Keep all song media and packages in the user's working directory. After acquisition, run:
 
 ```bash
-python3 scripts/process_song.py \
+python3 /absolute/path/to/sloth-getsunolyrics-skill/scripts/process_song.py \
   --video /absolute/path/song.mp4 \
   --vocals /absolute/path/lead-vocal.wav \
   --lyrics /absolute/path/lyrics.txt \
@@ -56,7 +56,9 @@ python3 scripts/process_song.py \
   --title 'Song title'
 ```
 
-Use `--language zh` or `--language en` when known. Use `--interval 0.25` for rapidly changing lyrics; the default is `0.5` seconds. Use `--resume` after interruption. Resume is allowed only when the packaged lyric hash still matches; changed lyrics force timeline regeneration.
+Use `--language zh` or `--language en` when known. Use `--interval 0.25` for rapidly changing lyrics; the default is `0.5` seconds. The command rejects missing streams, mismatched media durations, empty vocals, and invalid lyric files before expensive OCR work.
+
+Use `--resume` after interruption. Timeline reuse requires matching media and lyric hashes, OCR language, sampling interval, and pipeline fingerprint. Valid raw OCR is cached separately, so an algorithm update can reuse observations while still rebuilding the timeline. Never manually copy an old `timeline.json` into a new song package.
 
 The primary deliverable is `timeline.csv`:
 
@@ -92,6 +94,7 @@ Preserve `work/` until review finishes. It contains OCR frames and observations 
 - Interpolate a line only when OCR misses it; add `lyrics-line-interpolated-from-video`.
 - Add `low-video-lyrics-similarity` when the displayed video text does not sufficiently confirm the copied lyric.
 - Calibrate each video boundary within a bounded window using vocal onsets and energy.
+- Use a detected vocal offset for `end_ms` when a reliable silent gap exists; otherwise record the next-line fallback explicitly.
 - Keep integer milliseconds, half-open intervals `[start_ms, end_ms)`, and strictly increasing starts.
 - Preserve warnings for silence, large shifts, overlays, repeats, harmony, and separation artifacts.
 
@@ -102,20 +105,21 @@ Read [references/timeline-schema.md](references/timeline-schema.md) before consu
 Run:
 
 ```bash
-python3 scripts/validate_package.py --package-dir /absolute/path/song-package
+python3 /absolute/path/to/sloth-getsunolyrics-skill/scripts/validate_package.py \
+  --package-dir /absolute/path/song-package
 ```
 
-Confirm the lyrics, MP4, and vocal all belong to the same song; media durations are aligned; CSV/JSON/LRC/SRT/VTT contain the same lyric count and text; time intervals are legal; and every warning is reported.
+Confirm the lyrics, MP4, and vocal all belong to the same song; media durations are aligned; CSV/JSON/LRC/SRT/VTT contain the same text and times; time intervals are legal; and every warning is reported. Inspect `alignment_summary`: interpolated lines or a low confirmed ratio require human review even when structural validation passes.
 
 If a human-reviewed answer exists, evaluate only after generation:
 
 ```bash
-python3 scripts/evaluate_timeline.py \
+python3 /absolute/path/to/sloth-getsunolyrics-skill/scripts/evaluate_timeline.py \
   --generated /path/song-package/timeline.json \
   --gold-csv /path/reviewed.csv
 ```
 
-Use `--gold-typescript` for a TypeScript reference. Report text match rate, median absolute timing error, 95th percentile error, and low-confidence ratio. Never claim accuracy improvement without these metrics.
+Use `--gold-typescript` for a TypeScript reference. Report text match rate, start-time median absolute error, 95th percentile error, end-time error when the gold data provides ends, and low-confidence ratio. Never claim accuracy improvement without these metrics.
 
 ## Developer-only fallback
 

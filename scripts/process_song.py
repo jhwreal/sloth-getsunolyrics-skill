@@ -11,6 +11,9 @@ import shutil
 import subprocess
 import sys
 
+from extract_timeline import pipeline_fingerprint
+from media_utils import validate_media_pair
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,6 +28,53 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def timeline_is_reusable(
+    payload: dict,
+    *,
+    pipeline_hash: str,
+    lyrics_hash: str,
+    video_hash: str,
+    vocals_hash: str,
+    language: str,
+    interval_ms: int,
+) -> bool:
+    return all(
+        [
+            payload.get("pipeline_fingerprint") == pipeline_hash,
+            payload.get("lyrics_sha256") == lyrics_hash,
+            payload.get("video_sha256") == video_hash,
+            payload.get("vocals_sha256") == vocals_hash,
+            payload.get("ocr_language") == language,
+            payload.get("ocr_interval_ms") == interval_ms,
+        ]
+    )
+
+
+def copy_verified(source: Path, destination: Path, expected_hash: str) -> None:
+    if source == destination.resolve():
+        return
+    if destination.is_file() and sha256(destination) == expected_hash:
+        print(f"Reusing unchanged packaged input at {destination}", flush=True)
+        return
+    shutil.copy2(source, destination)
+    if sha256(destination) != expected_hash:
+        raise SystemExit(f"copied file failed hash verification: {destination}")
 
 
 def main() -> None:
@@ -50,58 +100,66 @@ def main() -> None:
         raise SystemExit(f"vocals do not exist: {args.vocals}")
     if not args.lyrics.is_file():
         raise SystemExit(f"lyrics do not exist: {args.lyrics}")
+    if args.interval < 0.25 or args.interval > 1.0:
+        raise SystemExit("--interval must be between 0.25 and 1.0 seconds")
+
+    video_source = args.video.resolve()
+    vocal_source = args.vocals.resolve()
+    lyrics_source = args.lyrics.resolve()
+    print("Preflight: validating media streams and durations", flush=True)
+    validate_media_pair(video_source, vocal_source)
+    video_hash = sha256(video_source)
+    vocals_hash = sha256(vocal_source)
+    lyrics_hash = sha256(lyrics_source)
 
     output = args.output_dir.resolve()
     work = output / "work"
     output.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
     packaged_video = output / "song.mp4"
-    if args.video.resolve() != packaged_video.resolve():
-        shutil.copy2(args.video, packaged_video)
+    copy_verified(video_source, packaged_video, video_hash)
     packaged_vocals = output / "vocals.wav"
     packaged_lyrics = output / "lyrics.txt"
-    if args.lyrics.resolve() != packaged_lyrics.resolve():
-        shutil.copy2(args.lyrics, packaged_lyrics)
+    copy_verified(lyrics_source, packaged_lyrics, lyrics_hash)
 
     separation_metadata = packaged_vocals.with_suffix(".separation.json")
     resumed_vocals = args.resume and packaged_vocals.is_file() and separation_metadata.is_file()
     if resumed_vocals:
-        separation = json.loads(separation_metadata.read_text())
+        separation = read_json(separation_metadata) or {}
         recorded_hash = separation.get("vocals_sha256")
         if recorded_hash and recorded_hash != sha256(packaged_vocals):
             raise SystemExit("existing vocals.wav does not match vocals.separation.json")
-        if sha256(args.vocals) != sha256(packaged_vocals):
+        if vocals_hash != sha256(packaged_vocals):
             resumed_vocals = False
         else:
-            print(f"Reusing separated vocals at {packaged_vocals}")
+            print(f"Reusing separated vocals at {packaged_vocals}", flush=True)
     if not resumed_vocals:
-        if args.vocals.resolve() != packaged_vocals.resolve():
-            shutil.copy2(args.vocals, packaged_vocals)
-        separation = {
-            "schema_version": 1,
-            "backend": args.vocals_source,
-            "source": str(args.vocals.resolve()),
-            "vocals": str(packaged_vocals),
-            "vocals_sha256": sha256(packaged_vocals),
-        }
-        separation_metadata.write_text(
-            json.dumps(separation, ensure_ascii=False, indent=2) + "\n"
-        )
+        copy_verified(vocal_source, packaged_vocals, vocals_hash)
+    separation = {
+        "schema_version": 2,
+        "backend": args.vocals_source,
+        "source_filename": vocal_source.name,
+        "vocals": packaged_vocals.name,
+        "vocals_sha256": vocals_hash,
+    }
+    write_json_atomic(separation_metadata, separation)
 
     timeline = output / "timeline.json"
-    lyrics_hash = sha256(packaged_lyrics)
     reusable_timeline = False
     if args.resume and timeline.is_file():
-        existing_timeline = json.loads(timeline.read_text())
-        reusable_timeline = all(
-            [
-                existing_timeline.get("lyrics_sha256") == lyrics_hash,
-                existing_timeline.get("video_sha256") == sha256(packaged_video),
-                existing_timeline.get("vocals_sha256") == sha256(packaged_vocals),
-            ]
-        )
+        existing_timeline = read_json(timeline)
+        if existing_timeline:
+            reusable_timeline = timeline_is_reusable(
+                existing_timeline,
+                pipeline_hash=pipeline_fingerprint(),
+                lyrics_hash=lyrics_hash,
+                video_hash=video_hash,
+                vocals_hash=vocals_hash,
+                language=args.language,
+                interval_ms=round(args.interval * 1000),
+            )
     if reusable_timeline:
-        print(f"Reusing timeline at {timeline}")
+        print(f"Reusing timeline at {timeline}", flush=True)
     else:
         run(
             [
@@ -133,15 +191,16 @@ def main() -> None:
             str(output),
         ]
     )
-    timeline_payload = json.loads(timeline.read_text())
+    timeline_payload = json.loads(timeline.read_text(encoding="utf-8"))
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
+        "pipeline_fingerprint": timeline_payload["pipeline_fingerprint"],
         "title": args.title,
         "source_url": args.source_url,
         "video": "song.mp4",
-        "video_sha256": sha256(packaged_video),
+        "video_sha256": video_hash,
         "vocals": "vocals.wav",
-        "vocals_sha256": sha256(packaged_vocals),
+        "vocals_sha256": vocals_hash,
         "lyrics": "lyrics.txt",
         "lyrics_sha256": lyrics_hash,
         "timeline": "timeline.json",
@@ -150,8 +209,9 @@ def main() -> None:
         "cue_count": len(timeline_payload["cues"]),
         "language": args.language,
         "ocr_interval_ms": timeline_payload["ocr_interval_ms"],
+        "alignment_summary": timeline_payload["alignment_summary"],
     }
-    (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    write_json_atomic(output / "manifest.json", manifest)
     run(
         [
             sys.executable,
@@ -162,7 +222,7 @@ def main() -> None:
             str(output / "validation.json"),
         ]
     )
-    print(f"Built lyric package at {output}")
+    print(f"Built lyric package at {output}", flush=True)
 
 
 if __name__ == "__main__":

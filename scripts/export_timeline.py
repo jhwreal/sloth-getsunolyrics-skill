@@ -10,6 +10,12 @@ import json
 from pathlib import Path
 
 
+def write_text_atomic(path: Path, content: str, *, encoding: str = "utf-8") -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(content, encoding=encoding)
+    temporary.replace(path)
+
+
 def lrc_time(milliseconds: int) -> str:
     minutes, remainder = divmod(max(0, milliseconds), 60_000)
     seconds, millis = divmod(remainder, 1000)
@@ -52,7 +58,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--basename", default="timeline")
     args = parser.parse_args()
-    payload = json.loads(args.input.read_text())
+    payload = json.loads(args.input.read_text(encoding="utf-8"))
     cues = validate(payload)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -77,7 +83,7 @@ def main() -> None:
     }
     for suffix, content in outputs.items():
         path = args.output_dir / f"{args.basename}{suffix}"
-        path.write_text(content)
+        write_text_atomic(path, content)
         print(path)
 
     csv_stream = io.StringIO(newline="")
@@ -94,7 +100,7 @@ def main() -> None:
             ]
         )
     csv_path = args.output_dir / f"{args.basename}.csv"
-    csv_path.write_text(csv_stream.getvalue(), encoding="utf-8-sig")
+    write_text_atomic(csv_path, csv_stream.getvalue(), encoding="utf-8-sig")
     print(csv_path)
 
 

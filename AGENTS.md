@@ -88,17 +88,20 @@
 - 默认行为应确定且可复现。随机算法固定种子；模型版本和参数写入元数据或日志。
 - 日志不得泄露用户隐私、访问令牌或本机敏感路径。日志要能定位处理阶段、输入片段和失败原因。
 - 长任务应报告阶段与进度，并支持失败后安全重试；已有有效中间产物可缓存，但缓存键必须包含源文件指纹和相关参数。
+- 时间轴缓存键必须包含媒体/歌词哈希、OCR 语言、采样间隔和流水线指纹；原始 OCR 缓存必须先清除异源旧帧，禁止跨歌曲污染。
+- 禁止在通用实现中加入歌曲标题、歌词句子或当前基准样本专用的过滤条件。
 - 临时文件应集中管理并可清理。不要把大型媒体、中间音轨、模型权重或生成结果误提交到 Git。
 - 新增技术栈、目录结构或命令后，同步更新本文件、`SKILL.md` 和 `README.md`，不要让维护约定落后于代码。
 
 当前入口和依赖：
 
 - `scripts/process_song.py`：端到端打包与断点续跑入口。
+- `scripts/media_utils.py`：媒体流、时长与配对预检。
 - `scripts/separate_vocals.py`：仅供开发者回退的 Demucs 本地人声分离。
 - `scripts/extract_timeline.py`：Suno 歌词、macOS Vision OCR 与人声活动校准。
 - `scripts/export_timeline.py`：JSON 转时间戳 CSV、LRC、SRT、VTT。
 - `scripts/evaluate_timeline.py`：与人工核对 CSV/TypeScript 对照评测。
-- `scripts/validate_package.py`：哈希、时长、时间区间和导出一致性验证。
+- `scripts/validate_package.py`：哈希、时长、歌词正文、时间区间及所有导出正文/时间一致性验证。
 - `requirements-demucs.txt`：仅供开发者离线回退的人声分离依赖，不是普通用户前置要求。
 
 长任务失败后优先使用 `--resume`，不得在已有可验证人声轨时无意义地重复模型推理。

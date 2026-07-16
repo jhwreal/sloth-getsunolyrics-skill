@@ -141,18 +141,23 @@ def separate(
             f"{vocal_duration:.3f}s"
         )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "backend": "demucs",
         "model": model,
         "device": device,
-        "model_cache": str(model_cache.resolve()),
-        "source": str(source.resolve()),
+        "model_cache": model_cache.name,
+        "source_filename": source.name,
         "source_sha256": sha256(source),
         "source_duration_ms": round(source_duration * 1000),
-        "vocals": str(output.resolve()),
+        "vocals": output.name,
         "vocals_sha256": sha256(output),
         "vocals_duration_ms": round(vocal_duration * 1000),
-        "command": command,
+        "command": {
+            "executable": Path(command[0]).name,
+            "two_stems": "vocals",
+            "model": model,
+            "device": device,
+        },
     }
 
 
@@ -195,7 +200,11 @@ def main() -> None:
         model_cache=args.model_cache.resolve(),
     )
     metadata_path = args.output.with_suffix(".separation.json")
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
+    temporary_metadata = metadata_path.with_name(f".{metadata_path.name}.tmp")
+    temporary_metadata.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    temporary_metadata.replace(metadata_path)
     print(f"Wrote {args.output} and {metadata_path}", file=sys.stderr)
     if args.keep_work and temporary:
         retained = args.output.with_suffix(".separation-work")

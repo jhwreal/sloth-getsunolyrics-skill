@@ -23,7 +23,8 @@ def parse_time(value: str) -> int:
 
 
 def load_csv(path: Path) -> list[dict]:
-    rows = list(csv.DictReader(path.open()))
+    with path.open(encoding="utf-8-sig", newline="") as source:
+        rows = list(csv.DictReader(source))
     cues = []
     for row in rows:
         text = row.get("english_lyric") or row.get("text") or row.get("lyric")
@@ -42,7 +43,7 @@ def load_csv(path: Path) -> list[dict]:
 
 
 def load_typescript(path: Path) -> list[dict]:
-    source = path.read_text()
+    source = path.read_text(encoding="utf-8")
     pattern = re.compile(
         r"startMs:\s*([0-9_]+),\s*\n\s*(?:endMs:\s*([0-9_]+),\s*\n\s*)?(?:line:\s*\"([^\"]*)\"|lines:\s*\[\"([^\"]*)\"\])"
     )
@@ -69,9 +70,63 @@ def percentile(values: list[float], fraction: float) -> float:
     return ordered[lower] * (1 - weight) + ordered[upper] * weight
 
 
-def timing_metrics(generated: list[dict], gold: list[dict], field: str) -> dict:
-    errors = [abs(int(actual[field]) - int(expected["start_ms"])) for actual, expected in zip(generated, gold)]
+def align_cues(generated: list[dict], gold: list[dict]) -> list[tuple[int, int]]:
+    """Order-align cues so one missing row does not corrupt every later metric."""
+    rows, columns = len(generated), len(gold)
+    gap_score = -0.55
+    scores = [[0.0] * (columns + 1) for _ in range(rows + 1)]
+    moves = [[""] * (columns + 1) for _ in range(rows + 1)]
+    for row in range(1, rows + 1):
+        scores[row][0] = row * gap_score
+        moves[row][0] = "generated"
+    for column in range(1, columns + 1):
+        scores[0][column] = column * gap_score
+        moves[0][column] = "gold"
+    for row in range(1, rows + 1):
+        for column in range(1, columns + 1):
+            similarity = difflib.SequenceMatcher(
+                None,
+                normalize(generated[row - 1]["text"]),
+                normalize(gold[column - 1]["text"]),
+            ).ratio()
+            options = {
+                "match": scores[row - 1][column - 1] + (2.0 * similarity - 1.0),
+                "generated": scores[row - 1][column] + gap_score,
+                "gold": scores[row][column - 1] + gap_score,
+            }
+            move = max(options, key=options.get)
+            scores[row][column] = options[move]
+            moves[row][column] = move
+    aligned = []
+    row, column = rows, columns
+    while row or column:
+        move = moves[row][column]
+        if move == "match":
+            similarity = difflib.SequenceMatcher(
+                None,
+                normalize(generated[row - 1]["text"]),
+                normalize(gold[column - 1]["text"]),
+            ).ratio()
+            if similarity >= 0.5:
+                aligned.append((row - 1, column - 1))
+            row -= 1
+            column -= 1
+        elif move == "generated":
+            row -= 1
+        else:
+            column -= 1
+    return list(reversed(aligned))
+
+
+def timing_metrics(
+    pairs: list[tuple[dict, dict]], actual_field: str, expected_field: str = "start_ms"
+) -> dict:
+    errors = [
+        abs(int(actual[actual_field]) - int(expected[expected_field]))
+        for actual, expected in pairs
+    ]
     return {
+        "cue_count": len(errors),
         "median_abs_error_ms": round(statistics.median(errors), 2),
         "mean_abs_error_ms": round(statistics.fmean(errors), 2),
         "p90_abs_error_ms": round(percentile(errors, 0.9), 2),
@@ -91,26 +146,34 @@ def main() -> None:
     parser.add_argument("--output", type=Path, help="optional JSON report path")
     args = parser.parse_args()
 
-    generated = json.loads(args.generated.read_text())["cues"]
+    generated = json.loads(args.generated.read_text(encoding="utf-8"))["cues"]
     expected = load_csv(args.gold_csv) if args.gold_csv else load_typescript(args.gold_typescript)
-    count = min(len(generated), len(expected))
-    if not count:
-        raise SystemExit("empty generated or gold timeline")
-    pairs = list(zip(generated[:count], expected[:count]))
+    aligned_indexes = align_cues(generated, expected)
+    if not aligned_indexes:
+        raise SystemExit("empty generated/gold timeline or no text-aligned cues")
+    pairs = [(generated[left], expected[right]) for left, right in aligned_indexes]
     similarities = [
         difflib.SequenceMatcher(None, normalize(actual["text"]), normalize(gold["text"])).ratio()
         for actual, gold in pairs
     ]
+    end_pairs = [
+        (actual, gold)
+        for actual, gold in pairs
+        if int(gold.get("end_ms") or 0) > int(gold["start_ms"])
+    ]
     report = {
         "generated_cues": len(generated),
         "gold_cues": len(expected),
-        "paired_cues": count,
+        "paired_cues": len(pairs),
+        "unmatched_generated_cues": len(generated) - len(pairs),
+        "unmatched_gold_cues": len(expected) - len(pairs),
         "exact_text_matches": sum(
             normalize(actual["text"]) == normalize(gold["text"]) for actual, gold in pairs
         ),
         "text_similarity_at_least_0_9": sum(value >= 0.9 for value in similarities),
-        "video_timing": timing_metrics(generated[:count], expected[:count], "video_start_ms"),
-        "vocal_calibrated_timing": timing_metrics(generated[:count], expected[:count], "start_ms"),
+        "video_timing": timing_metrics(pairs, "video_start_ms"),
+        "vocal_calibrated_timing": timing_metrics(pairs, "start_ms"),
+        "end_timing": timing_metrics(end_pairs, "end_ms", "end_ms") if end_pairs else None,
         "flag_counts": dict(
             sorted(Counter(flag for cue in generated for flag in cue.get("flags", [])).items())
         ),
@@ -134,7 +197,7 @@ def main() -> None:
     rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(rendered)
+        args.output.write_text(rendered, encoding="utf-8")
     print(rendered, end="")
 
 

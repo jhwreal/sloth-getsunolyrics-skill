@@ -41,6 +41,12 @@ git clone https://github.com/jhwreal/sloth-getsunolyrics-skill.git \
 
 安装后重新打开 Codex 任务，使 Skill 被发现。
 
+以后更新 Skill：
+
+```bash
+git -C "${CODEX_HOME:-$HOME/.codex}/skills/sloth-getsunolyrics-skill" pull --ff-only
+```
+
 ### 使用方法
 
 在 Chrome 登录 Suno 后告诉 Codex：
@@ -66,7 +72,7 @@ git clone https://github.com/jhwreal/sloth-getsunolyrics-skill.git \
 - **不确定性可见：** OCR 漏行、文本不一致、静音边界或大幅移动都会写入警告，不静默猜测。
 - **结果可追溯：** 保存源文件哈希、歌词哈希、参数、中间 OCR 结果、置信度和校验报告。
 
-内部统一使用整数毫秒和半开区间 `[start_ms, end_ms)`。默认目标是行级起点误差中位数不超过 200 ms、95 分位不超过 500 ms；只有在独立人工答案上测量后才会报告达标。
+内部统一使用整数毫秒和半开区间 `[start_ms, end_ms)`。当前两首人工样本的验收线是行级起点中位误差小于 500 ms；更严格的工程目标是中位数不超过 200 ms、95 分位不超过 500 ms。只有在独立人工答案上测量后才会报告达标。
 
 ### 输出目录
 
@@ -92,7 +98,7 @@ song-package/
 本地流水线入口：
 
 ```bash
-python3 scripts/process_song.py \
+python3 /absolute/path/to/sloth-getsunolyrics-skill/scripts/process_song.py \
   --video /path/song.mp4 \
   --vocals /path/lead-vocal.wav \
   --lyrics /path/lyrics.txt \
@@ -135,6 +141,12 @@ git clone https://github.com/jhwreal/sloth-getsunolyrics-skill.git \
 
 Start a new Codex task after installation so the Skill is discovered.
 
+To update it later:
+
+```bash
+git -C "${CODEX_HOME:-$HOME/.codex}/skills/sloth-getsunolyrics-skill" pull --ff-only
+```
+
 ### Usage
 
 With Suno logged in, say:
@@ -153,7 +165,7 @@ A human-reviewed CSV or TypeScript timeline is evaluation-only and is never pass
 - **Uncertainty stays visible:** missing OCR lines, text mismatches, silent boundaries, and large shifts become review flags.
 - **Outputs are traceable:** source hashes, lyric hashes, parameters, OCR evidence, confidence, and validation are retained.
 
-Internal timing uses integer milliseconds and half-open intervals `[start_ms, end_ms)`. Accuracy claims are made only after comparison with an independent human-reviewed timeline.
+Internal timing uses integer milliseconds and half-open intervals `[start_ms, end_ms)`. The two current human-reviewed fixtures use a median start-error acceptance line below 500 ms; the stricter engineering target is median ≤200 ms and p95 ≤500 ms. Accuracy claims are made only after comparison with an independent human-reviewed timeline.
 
 ### Developer note
 

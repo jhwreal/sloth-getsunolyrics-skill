@@ -14,7 +14,7 @@
 
 ## Internal JSON
 
-The extractor writes media metadata, `lyrics_sha256`, and an ordered `cues` array. Each cue contains:
+The extractor writes source filenames (never absolute user paths), media hashes and durations, `pipeline_fingerprint`, `alignment_summary`, and an ordered `cues` array. Each cue contains:
 
 - `index`: one-based lyric order.
 - `text`: canonical line copied from Suno.
@@ -25,9 +25,12 @@ The extractor writes media metadata, `lyrics_sha256`, and an ordered `cues` arra
 - `video_ocr_text`: OCR evidence retained for audit, never the canonical output.
 - `lyrics_video_similarity`: normalized comparison between canonical text and OCR evidence.
 - `timing_source`: `vocal_alignment` when moved, otherwise `video_highlight`.
+- `end_timing_source`: `vocal_offset`, `next_line_start_fallback`, or `media_duration_fallback`.
 - `confidence`: combined OCR/text similarity confidence from 0 to 1.
 - `flags`: explicit warnings requiring review.
 
 Require non-negative, strictly increasing starts and `start_ms < end_ms <= media_duration_ms`.
 
-The package also contains `lyrics.txt`, media hashes, source metadata, CSV/LRC/SRT/VTT exports, and `validation.json`. A reviewed CSV or TypeScript timeline is never part of the generation package; it may only be passed separately to `evaluate_timeline.py` afterward.
+`alignment_summary` reports canonical lyric count, OCR anchor count, confirmed count, interpolated count, and confirmed ratio. Structural validity does not mean interpolated lines are accurate; review every interpolated cue.
+
+The package also contains `lyrics.txt`, media hashes, source metadata, CSV/LRC/SRT/VTT exports, and `validation.json`. Validation parses every export and checks its text and timestamps against JSON. A reviewed CSV or TypeScript timeline is never part of the generation package; it may only be passed separately to `evaluate_timeline.py` afterward.

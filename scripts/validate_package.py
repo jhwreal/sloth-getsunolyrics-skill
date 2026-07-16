@@ -9,11 +9,14 @@ import hashlib
 import json
 from pathlib import Path
 import re
-import shutil
-import subprocess
+
+from extract_timeline import parse_lyrics
+from media_utils import probe_media
 
 
 CSV_TIME_RE = re.compile(r"^(\d{2,}):(\d{2})\.(\d{3})$")
+LRC_RE = re.compile(r"^\[(\d+):(\d{2})\.(\d{2})\](.*)$")
+SUBTITLE_TIME_RE = re.compile(r"^(\d{2}):(\d{2}):(\d{2})[,.](\d{3})$")
 
 
 def sha256(path: Path) -> str:
@@ -22,28 +25,6 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
-
-
-def duration_ms(path: Path) -> int:
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        raise SystemExit("missing required command: ffprobe")
-    result = subprocess.run(
-        [
-            ffprobe,
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=nw=1:nk=1",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return round(float(result.stdout.strip()) * 1000)
 
 
 def parse_csv_time(value: str) -> int:
@@ -56,14 +37,69 @@ def parse_csv_time(value: str) -> int:
     return minutes * 60_000 + seconds * 1000 + milliseconds
 
 
+def parse_subtitle_time(value: str) -> int:
+    match = SUBTITLE_TIME_RE.fullmatch(value)
+    if not match:
+        raise ValueError(f"invalid subtitle time: {value}")
+    hours, minutes, seconds, milliseconds = map(int, match.groups())
+    if minutes >= 60 or seconds >= 60:
+        raise ValueError(f"invalid subtitle time: {value}")
+    return hours * 3_600_000 + minutes * 60_000 + seconds * 1000 + milliseconds
+
+
+def parse_lrc(path: Path) -> list[dict]:
+    cues = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line:
+            continue
+        match = LRC_RE.fullmatch(line)
+        if not match:
+            raise ValueError(f"invalid LRC line: {line}")
+        minutes, seconds, centiseconds, text = match.groups()
+        if int(seconds) >= 60:
+            raise ValueError(f"invalid LRC seconds: {line}")
+        cues.append(
+            {
+                "start_ms": int(minutes) * 60_000 + int(seconds) * 1000 + int(centiseconds) * 10,
+                "text": text,
+            }
+        )
+    return cues
+
+
+def parse_numbered_subtitles(path: Path, *, webvtt: bool = False) -> list[dict]:
+    content = path.read_text(encoding="utf-8").replace("\r\n", "\n").strip()
+    blocks = re.split(r"\n{2,}", content) if content else []
+    if webvtt:
+        if not blocks or blocks[0].strip() != "WEBVTT":
+            raise ValueError("WebVTT file is missing its WEBVTT header")
+        blocks = blocks[1:]
+    cues = []
+    for expected_index, block in enumerate(blocks, 1):
+        lines = block.splitlines()
+        if len(lines) < 3 or lines[0].strip() != str(expected_index):
+            raise ValueError(f"invalid subtitle block {expected_index}")
+        timing = re.fullmatch(r"(\S+)\s+-->\s+(\S+)", lines[1].strip())
+        if not timing:
+            raise ValueError(f"invalid subtitle timing at block {expected_index}")
+        cues.append(
+            {
+                "start_ms": parse_subtitle_time(timing.group(1)),
+                "end_ms": parse_subtitle_time(timing.group(2)),
+                "text": "\n".join(lines[2:]),
+            }
+        )
+    return cues
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     root = args.package_dir.resolve()
-    manifest = json.loads((root / "manifest.json").read_text())
-    timeline = json.loads((root / manifest["timeline"]).read_text())
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    timeline = json.loads((root / manifest["timeline"]).read_text(encoding="utf-8"))
     video = root / manifest["video"]
     vocals = root / manifest["vocals"]
     lyrics = root / manifest["lyrics"]
@@ -72,8 +108,18 @@ def main() -> None:
     checks["video_sha256"] = sha256(video) == manifest["video_sha256"]
     checks["vocals_sha256"] = sha256(vocals) == manifest["vocals_sha256"]
     checks["lyrics_sha256"] = sha256(lyrics) == manifest["lyrics_sha256"]
-    video_duration = duration_ms(video)
-    vocal_duration = duration_ms(vocals)
+    video_info = probe_media(video)
+    vocal_info = probe_media(vocals)
+    video_duration = int(video_info["duration_ms"])
+    vocal_duration = int(vocal_info["duration_ms"])
+    checks["media_streams"] = all(
+        [
+            video_info["has_video"],
+            video_info["has_audio"],
+            not vocal_info["has_video"],
+            vocal_info["has_audio"],
+        ]
+    )
     checks["media_durations_aligned"] = abs(video_duration - vocal_duration) <= max(
         500, round(video_duration * 0.005)
     )
@@ -87,14 +133,81 @@ def main() -> None:
         int(cues[index]["start_ms"]) < int(cues[index + 1]["start_ms"])
         for index in range(len(cues) - 1)
     )
-    lrc_count = sum(1 for line in (root / "timeline.lrc").read_text().splitlines() if line.startswith("["))
-    srt_count = len(re.findall(r"(?m)^\d+\s*$", (root / "timeline.srt").read_text()))
-    vtt_count = len(re.findall(r"(?m)^\d+\s*$", (root / "timeline.vtt").read_text()))
-    with (root / "timeline.csv").open(encoding="utf-8-sig", newline="") as source:
-        reader = csv.DictReader(source)
-        csv_rows = list(reader)
+    checks["cue_indexes"] = all(
+        int(cue.get("index", -1)) == index for index, cue in enumerate(cues, 1)
+    )
+    checks["cue_text"] = all(isinstance(cue.get("text"), str) and cue["text"] for cue in cues)
+    checks["cue_confidence"] = all(
+        isinstance(cue.get("confidence"), (int, float))
+        and 0.0 <= float(cue["confidence"]) <= 1.0
+        for cue in cues
+    )
+    checks["end_timing_sources"] = all(
+        cue.get("end_timing_source")
+        in {"vocal_offset", "next_line_start_fallback", "media_duration_fallback"}
+        for cue in cues
+    )
+    canonical_lyrics = parse_lyrics(lyrics)
+    checks["timeline_text_matches_lyrics"] = [cue.get("text") for cue in cues] == [
+        cue["text"] for cue in canonical_lyrics
+    ]
+    checks["timeline_inputs_match_manifest"] = all(
+        [
+            timeline.get("video_sha256") == manifest.get("video_sha256"),
+            timeline.get("vocals_sha256") == manifest.get("vocals_sha256"),
+            timeline.get("lyrics_sha256") == manifest.get("lyrics_sha256"),
+            timeline.get("pipeline_fingerprint") == manifest.get("pipeline_fingerprint"),
+            timeline.get("media_duration_ms") == manifest.get("media_duration_ms"),
+            timeline.get("video") == manifest.get("video"),
+            timeline.get("vocals") == manifest.get("vocals"),
+            timeline.get("lyrics") == manifest.get("lyrics"),
+            timeline.get("ocr_language") == manifest.get("language"),
+            timeline.get("ocr_interval_ms") == manifest.get("ocr_interval_ms"),
+            timeline.get("alignment_summary") == manifest.get("alignment_summary"),
+        ]
+    )
+    summary = timeline.get("alignment_summary") or {}
+    confirmed_count = sum(
+        cue.get("text_source") == "suno_lyrics_confirmed_by_video" for cue in cues
+    )
+    checks["alignment_summary"] = all(
+        [
+            summary.get("lyrics_count") == len(cues),
+            summary.get("confirmed_count") == confirmed_count,
+            summary.get("interpolated_count") == len(cues) - confirmed_count,
+            summary.get("confirmed_ratio") == round(confirmed_count / len(cues), 4)
+            if cues
+            else False,
+        ]
+    )
+    checks["manifest_exports"] = manifest.get("exports") == [
+        "timeline.csv",
+        "timeline.lrc",
+        "timeline.srt",
+        "timeline.vtt",
+    ]
+    checks["timeline_duration_matches_media"] = int(timeline["media_duration_ms"]) == min(
+        video_duration, vocal_duration
+    )
+    try:
+        lrc_rows = parse_lrc(root / "timeline.lrc")
+        srt_rows = parse_numbered_subtitles(root / "timeline.srt")
+        vtt_rows = parse_numbered_subtitles(root / "timeline.vtt", webvtt=True)
+    except (OSError, ValueError):
+        lrc_rows, srt_rows, vtt_rows = [], [], []
+    lrc_count = len(lrc_rows)
+    srt_count = len(srt_rows)
+    vtt_count = len(vtt_rows)
+    try:
+        with (root / "timeline.csv").open(encoding="utf-8-sig", newline="") as source:
+            reader = csv.DictReader(source)
+            csv_rows = list(reader)
+            csv_fields = reader.fieldnames
+    except (OSError, csv.Error):
+        csv_rows = []
+        csv_fields = None
     csv_count = len(csv_rows)
-    checks["csv_columns"] = reader.fieldnames == [
+    checks["csv_columns"] = csv_fields == [
         "id",
         "section",
         "start_time",
@@ -115,6 +228,23 @@ def main() -> None:
         )
     except ValueError:
         checks["csv_matches_json"] = False
+    checks["lrc_matches_json"] = all(
+        row["text"] == str(cue["text"])
+        and row["start_ms"] == (int(cue["start_ms"]) // 10) * 10
+        for row, cue in zip(lrc_rows, cues)
+    ) and len(lrc_rows) == len(cues)
+    checks["srt_matches_json"] = all(
+        row["text"] == str(cue["text"])
+        and row["start_ms"] == int(cue["start_ms"])
+        and row["end_ms"] == int(cue["end_ms"])
+        for row, cue in zip(srt_rows, cues)
+    ) and len(srt_rows) == len(cues)
+    checks["vtt_matches_json"] = all(
+        row["text"] == str(cue["text"])
+        and row["start_ms"] == int(cue["start_ms"])
+        and row["end_ms"] == int(cue["end_ms"])
+        for row, cue in zip(vtt_rows, cues)
+    ) and len(vtt_rows) == len(cues)
     report = {
         "valid": all(checks.values()),
         "checks": checks,
@@ -131,7 +261,9 @@ def main() -> None:
     rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(rendered)
+        temporary = args.output.with_name(f".{args.output.name}.tmp")
+        temporary.write_text(rendered, encoding="utf-8")
+        temporary.replace(args.output)
     print(rendered, end="")
     if not report["valid"]:
         raise SystemExit(1)
