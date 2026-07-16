@@ -19,12 +19,14 @@ import sys
 import tempfile
 import wave
 
+from lyrics_conflict import compare_lyrics_to_video, render_markdown
 from media_utils import require_command, validate_media_pair
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 VISION_SOURCE = SKILL_ROOT / "scripts" / "vision_ocr.swift"
-PIPELINE_SCHEMA_VERSION = 2
+LYRICS_CONFLICT_SOURCE = SKILL_ROOT / "scripts" / "lyrics_conflict.py"
+PIPELINE_SCHEMA_VERSION = 3
 OCR_CACHE_VERSION = 2
 SECTION_RE = re.compile(r"^[\[［（(]([^\]］）)]+)[\]］）)]\s*")
 SECTION_ONLY_RE = re.compile(r"^[\[［（(]([^\]］）)]+)[\]］）)]\s*$")
@@ -54,7 +56,11 @@ def read_json(path: Path) -> dict | None:
 
 def pipeline_fingerprint() -> str:
     digest = hashlib.sha256()
-    for path in [Path(__file__).resolve(), VISION_SOURCE.resolve()]:
+    for path in [
+        Path(__file__).resolve(),
+        LYRICS_CONFLICT_SOURCE.resolve(),
+        VISION_SOURCE.resolve(),
+    ]:
         digest.update(path.name.encode("utf-8"))
         digest.update(path.read_bytes())
     return digest.hexdigest()
@@ -325,9 +331,13 @@ def align_lyrics_to_video(
     interval_ms: int,
     *,
     duration_ms: int | None = None,
+    filter_relevant: bool = True,
+    minimum_similarity: float = 0.5,
+    low_similarity_text_source: str = "suno_lyrics_conflict_overridden",
 ) -> list[dict]:
     """Order-align canonical lyric lines to noisy OCR cues without changing lyric text."""
-    video_cues = filter_video_cues_for_lyrics(lyrics, video_cues)
+    if filter_relevant:
+        video_cues = filter_video_cues_for_lyrics(lyrics, video_cues)
     lyric_count = len(lyrics)
     video_count = len(video_cues)
     gap_score = -0.55
@@ -371,19 +381,24 @@ def align_lyrics_to_video(
         video_index = mapping.get(lyric_index)
         if video_index is not None:
             candidate_similarity = text_similarity(lyric["text"], video_cues[video_index]["text"])
-            if candidate_similarity < 0.5:
+            if candidate_similarity < minimum_similarity:
                 video_index = None
         if video_index is not None:
             video = video_cues[video_index]
             similarity = text_similarity(lyric["text"], video["text"])
             flags = [] if similarity >= 0.72 else ["low-video-lyrics-similarity"]
+            text_source = (
+                "suno_lyrics_confirmed_by_video"
+                if similarity >= 0.5
+                else low_similarity_text_source
+            )
             aligned.append(
                 {
                     "text": lyric["text"],
                     "section": lyric.get("section") or video.get("section"),
                     "video_start_ms": int(video["video_start_ms"]),
                     "confidence": min(float(video["confidence"]), similarity),
-                    "text_source": "suno_lyrics_confirmed_by_video",
+                    "text_source": text_source,
                     "video_ocr_text": video["text"],
                     "lyrics_video_similarity": round(similarity, 4),
                     "flags": flags,
@@ -441,6 +456,29 @@ def align_lyrics_to_video(
         cue["video_start_ms"] = candidate
         previous = cue["video_start_ms"]
     return aligned
+
+
+def apply_lyrics_conflict_resolution(
+    aligned_cues: list[dict], comparison: dict, resolution: str
+) -> None:
+    """Record an explicit conflict decision on every affected copied lyric line."""
+    if not comparison.get("requires_user_decision"):
+        return
+    flag = (
+        "video-lyrics-conflict-user-chose-copied"
+        if resolution == "use-copied"
+        else "video-lyrics-conflict-verified-as-ocr-error"
+    )
+    affected_lines = {
+        int(item["copied_line"])
+        for item in comparison.get("differences", [])
+        if item.get("copied_line") is not None
+    }
+    for line_number in affected_lines:
+        cue = aligned_cues[line_number - 1]
+        cue["flags"].append(flag)
+        if resolution == "use-copied":
+            cue["text_source"] = "suno_lyrics_conflict_overridden"
 
 
 def contains_cjk(text: str) -> bool:
@@ -537,6 +575,8 @@ def build_video_cues(frames: list[dict], interval_ms: int) -> list[dict]:
         if current is None:
             current = candidate.copy()
             current["video_start_ms"] = candidate["time_ms"]
+            current["last_seen_ms"] = candidate["time_ms"]
+            current["sample_count"] = 1
             accepted.append(current)
             continue
         if same_text(candidate["text"], current["text"]):
@@ -545,9 +585,13 @@ def build_video_cues(frames: list[dict], interval_ms: int) -> list[dict]:
             if not current.get("section") and candidate.get("section"):
                 current["section"] = candidate["section"]
             current["confidence"] = max(current["confidence"], candidate["confidence"])
+            current["last_seen_ms"] = candidate["time_ms"]
+            current["sample_count"] += 1
             continue
         current = candidate.copy()
         current["video_start_ms"] = candidate["time_ms"]
+        current["last_seen_ms"] = candidate["time_ms"]
+        current["sample_count"] = 1
         accepted.append(current)
 
     # Remove duplicate OCR states that were separated only by a short recognition glitch.
@@ -556,17 +600,34 @@ def build_video_cues(frames: list[dict], interval_ms: int) -> list[dict]:
         if compact and same_text(cue["text"], compact[-1]["text"]):
             if len(normalize_text(cue["text"])) > len(normalize_text(compact[-1]["text"])):
                 compact[-1]["text"] = cue["text"]
+            compact[-1]["confidence"] = max(
+                compact[-1]["confidence"], cue["confidence"]
+            )
+            compact[-1]["last_seen_ms"] = max(
+                compact[-1]["last_seen_ms"], cue["last_seen_ms"]
+            )
+            compact[-1]["sample_count"] += cue["sample_count"]
             continue
         compact.append(cue)
     # A wrapped continuation can briefly occupy the active anchor during a scroll.
     merged: list[dict] = []
     glitch_window_ms = max(1500, interval_ms * 3)
     for cue in compact:
-        if any(
-            same_text(cue["text"], prior["text"])
-            and cue["video_start_ms"] - prior["video_start_ms"] <= glitch_window_ms
-            for prior in merged[-3:]
-        ):
+        repeated = next(
+            (
+                prior
+                for prior in reversed(merged[-3:])
+                if same_text(cue["text"], prior["text"])
+                and cue["video_start_ms"] - prior["video_start_ms"] <= glitch_window_ms
+            ),
+            None,
+        )
+        if repeated is not None:
+            repeated["confidence"] = max(repeated["confidence"], cue["confidence"])
+            repeated["last_seen_ms"] = max(
+                repeated["last_seen_ms"], cue["last_seen_ms"]
+            )
+            repeated["sample_count"] += cue["sample_count"]
             continue
         short = len(normalize_text(cue["text"])) <= 12
         if (
@@ -579,6 +640,13 @@ def build_video_cues(frames: list[dict], interval_ms: int) -> list[dict]:
             if normalize_text(cue["text"]) in normalize_text(previous["text"]):
                 continue
             previous["text"] = f'{previous["text"]} {cue["text"]}'.strip()
+            previous["confidence"] = min(previous["confidence"], cue["confidence"])
+            previous["last_seen_ms"] = max(
+                previous["last_seen_ms"], cue["last_seen_ms"]
+            )
+            previous["sample_count"] = max(
+                previous["sample_count"], cue["sample_count"]
+            )
             continue
         merged.append(cue)
     return merged
@@ -766,6 +834,14 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=0.5, help="OCR sampling interval in seconds")
     parser.add_argument("--work-dir", type=Path, help="persistent intermediate directory")
     parser.add_argument("--keep-work", action="store_true")
+    parser.add_argument(
+        "--lyrics-conflict-resolution",
+        choices=["ask", "verified-ocr-error", "use-copied"],
+        default="ask",
+        help="how to continue after a high-evidence video/copy lyric conflict",
+    )
+    parser.add_argument("--lyrics-comparison-json", type=Path)
+    parser.add_argument("--lyrics-comparison-markdown", type=Path)
     args = parser.parse_args()
     for path in [args.video, args.vocals, args.lyrics]:
         if not path.is_file():
@@ -776,7 +852,7 @@ def main() -> None:
     video_path = args.video.resolve()
     vocals_path = args.vocals.resolve()
     lyrics_path = args.lyrics.resolve()
-    print("[1/5] Validate media streams and durations", file=sys.stderr)
+    print("[1/6] Validate media streams and durations", file=sys.stderr)
     video_info, vocal_info = validate_media_pair(video_path, vocals_path)
     duration_ms = min(video_info["duration_ms"], vocal_info["duration_ms"])
     lyrics = parse_lyrics(lyrics_path)
@@ -788,26 +864,86 @@ def main() -> None:
     else:
         temporary = tempfile.TemporaryDirectory(prefix="sloth-getsunolyrics-")
         work = Path(temporary.name)
-    print(f"[2/5] OCR video frames every {args.interval:.2f}s", file=sys.stderr)
+    print(f"[2/6] OCR video frames every {args.interval:.2f}s", file=sys.stderr)
     frames = extract_ocr(video_path, work, args.interval, args.language)
-    print("[3/5] Build video anchors and align supplied Suno lyrics", file=sys.stderr)
+    print("[3/6] Compare copied lyrics with unfiltered MP4 lyric anchors", file=sys.stderr)
     raw_video_cues = build_video_cues(frames, round(args.interval * 1000))
-    video_cues = filter_video_cues_for_lyrics(lyrics, raw_video_cues)
+    comparison = compare_lyrics_to_video(lyrics, raw_video_cues)
+    comparison["lyrics_sha256"] = sha256(lyrics_path)
+    comparison["video_sha256"] = sha256(video_path)
+    comparison["requested_resolution"] = args.lyrics_conflict_resolution
+    comparison["decision_pending"] = bool(
+        comparison["requires_user_decision"]
+        and args.lyrics_conflict_resolution == "ask"
+    )
+    comparison["detected_status"] = comparison["status"]
+    if comparison["requires_user_decision"]:
+        if args.lyrics_conflict_resolution == "verified-ocr-error":
+            comparison["status"] = "resolved_as_ocr_error"
+        elif args.lyrics_conflict_resolution == "use-copied":
+            comparison["status"] = "resolved_use_copied"
+
+    comparison_json = (
+        args.lyrics_comparison_json.resolve()
+        if args.lyrics_comparison_json
+        else args.output.resolve().with_name("lyrics-comparison.json")
+    )
+    comparison_markdown = (
+        args.lyrics_comparison_markdown.resolve()
+        if args.lyrics_comparison_markdown
+        else args.output.resolve().with_name("lyrics-comparison.md")
+    )
+    write_json_atomic(comparison_json, comparison)
+    write_text_atomic(comparison_markdown, render_markdown(comparison))
+    if comparison["decision_pending"]:
+        print(
+            "      MP4 and copied lyrics may differ; timeline generation paused before vocal calibration.",
+            file=sys.stderr,
+        )
+        print(f"      Read {comparison_markdown}", file=sys.stderr)
+        raise SystemExit(3)
+
+    print("[4/6] Build video anchors and align supplied Suno lyrics", file=sys.stderr)
+    use_unfiltered_video = bool(
+        comparison["requires_user_decision"]
+        and args.lyrics_conflict_resolution in {"use-copied", "verified-ocr-error"}
+    )
+    video_cues = (
+        raw_video_cues
+        if use_unfiltered_video
+        else filter_video_cues_for_lyrics(lyrics, raw_video_cues)
+    )
     aligned_cues = align_lyrics_to_video(
         lyrics,
         video_cues,
         round(args.interval * 1000),
         duration_ms=duration_ms,
+        filter_relevant=False,
+        minimum_similarity=0.0 if use_unfiltered_video else 0.5,
+        low_similarity_text_source=(
+            "suno_lyrics_confirmed_by_video"
+            if args.lyrics_conflict_resolution == "verified-ocr-error"
+            else "suno_lyrics_conflict_overridden"
+        ),
+    )
+    apply_lyrics_conflict_resolution(
+        aligned_cues, comparison, args.lyrics_conflict_resolution
     )
     print(
         f"      aligned {len(aligned_cues)} lyric lines to {len(video_cues)} video anchors",
         file=sys.stderr,
     )
-    print("[4/5] Analyze isolated-vocal activity and calibrate boundaries", file=sys.stderr)
+    print("[5/6] Analyze isolated-vocal activity and calibrate boundaries", file=sys.stderr)
     db, frame_ms, threshold = vocal_envelope(vocals_path, work)
     timeline = calibrate(aligned_cues, db, frame_ms, threshold, duration_ms)
     confirmed_count = sum(
         cue["text_source"] == "suno_lyrics_confirmed_by_video" for cue in timeline
+    )
+    interpolated_count = sum(
+        cue["text_source"] == "suno_lyrics_interpolated_from_video" for cue in timeline
+    )
+    conflict_overridden_count = sum(
+        cue["text_source"] == "suno_lyrics_conflict_overridden" for cue in timeline
     )
     payload = {
         "schema_version": PIPELINE_SCHEMA_VERSION,
@@ -824,18 +960,29 @@ def main() -> None:
         "ocr_interval_ms": round(args.interval * 1000),
         "ocr_language": args.language,
         "vocal_threshold_db": round(threshold, 2),
+        "lyrics_comparison": {
+            "status": comparison["status"],
+            "detected_status": comparison["detected_status"],
+            "requested_resolution": comparison["requested_resolution"],
+            "decision_pending": comparison["decision_pending"],
+            "difference_count": comparison["difference_count"],
+            "uncertain_item_count": comparison["uncertain_item_count"],
+            "report_json": comparison_json.name,
+            "report_markdown": comparison_markdown.name,
+        },
         "alignment_summary": {
             "lyrics_count": len(lyrics),
             "video_anchor_count": len(video_cues),
             "raw_video_anchor_count": len(raw_video_cues),
             "confirmed_count": confirmed_count,
-            "interpolated_count": len(timeline) - confirmed_count,
+            "interpolated_count": interpolated_count,
+            "conflict_overridden_count": conflict_overridden_count,
             "confirmed_ratio": round(confirmed_count / len(timeline), 4),
         },
         "cues": timeline,
     }
     write_json_atomic(args.output, payload)
-    print(f"[5/5] Wrote {args.output} ({len(timeline)} cues)", file=sys.stderr)
+    print(f"[6/6] Wrote {args.output} ({len(timeline)} cues)", file=sys.stderr)
     if args.keep_work and temporary:
         retained = args.output.with_suffix(".work")
         shutil.copytree(work, retained, dirs_exist_ok=True)

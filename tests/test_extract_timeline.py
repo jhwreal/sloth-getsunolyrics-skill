@@ -11,6 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from extract_timeline import (  # noqa: E402
+    apply_lyrics_conflict_resolution,
     align_lyrics_to_video,
     build_video_cues,
     extract_ocr,
@@ -68,6 +69,42 @@ class ExtractTimelineTests(unittest.TestCase):
         video = [{"text": "totally unrelated", "video_start_ms": 1000, "confidence": 1.0}]
         with self.assertRaises(SystemExit):
             align_lyrics_to_video(lyrics, video, 500)
+
+    def test_user_can_keep_copied_text_after_explicit_conflict_choice(self) -> None:
+        lyrics = [{"lyrics_index": 1, "text": "copied words", "section": None}]
+        video = [
+            {
+                "text": "different generated words",
+                "video_start_ms": 1000,
+                "confidence": 0.95,
+            }
+        ]
+        aligned = align_lyrics_to_video(
+            lyrics,
+            video,
+            500,
+            filter_relevant=False,
+            minimum_similarity=0.0,
+        )
+        self.assertEqual(aligned[0]["text"], "copied words")
+        self.assertEqual(aligned[0]["text_source"], "suno_lyrics_conflict_overridden")
+        self.assertIn("low-video-lyrics-similarity", aligned[0]["flags"])
+
+    def test_conflict_choice_overrides_even_moderately_similar_text_source(self) -> None:
+        aligned = [
+            {
+                "text": "Answers glow with golden fire",
+                "text_source": "suno_lyrics_confirmed_by_video",
+                "flags": ["low-video-lyrics-similarity"],
+            }
+        ]
+        comparison = {
+            "requires_user_decision": True,
+            "differences": [{"copied_line": 1}],
+        }
+        apply_lyrics_conflict_resolution(aligned, comparison, "use-copied")
+        self.assertEqual(aligned[0]["text_source"], "suno_lyrics_conflict_overridden")
+        self.assertIn("video-lyrics-conflict-user-chose-copied", aligned[0]["flags"])
 
     def test_similar_but_distinct_lyrics_are_not_deduplicated(self) -> None:
         self.assertFalse(
@@ -134,6 +171,27 @@ class ExtractTimelineTests(unittest.TestCase):
             500,
         )
         self.assertEqual([cue["text"] for cue in cues].count("repeat this lyric line"), 2)
+
+    def test_video_cues_count_repeated_frame_evidence(self) -> None:
+        def frame(time_ms: int) -> dict:
+            return {
+                "timeMs": time_ms,
+                "observations": [
+                    {
+                        "text": "stable changed lyric",
+                        "confidence": 0.92,
+                        "x": 0.2,
+                        "y": 0.38,
+                        "width": 0.6,
+                        "height": 0.04,
+                        "brightRatio": 0.8,
+                    }
+                ],
+            }
+
+        cues = build_video_cues([frame(0), frame(500), frame(1000)], 500)
+        self.assertEqual(cues[0]["sample_count"], 3)
+        self.assertEqual(cues[0]["last_seen_ms"], 1000)
 
     def test_generic_lyrics_filter_removes_title_without_hard_coding(self) -> None:
         lyrics = [{"text": "the actual lyric", "section": None}]

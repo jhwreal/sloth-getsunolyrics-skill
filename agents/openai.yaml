@@ -1,4 +1,4 @@
 interface:
   display_name: "Sloth Get Suno Lyrics"
   short_description: "Turn a named Suno song into timestamped lyrics"
-  default_prompt: "Use $sloth-getsunolyrics-skill and Computer Use to find my named song in logged-in Suno, copy its lyrics, download its lyric video and lead-vocal stem, and deliver a validated timestamped CSV lyric package."
+  default_prompt: "Use $sloth-getsunolyrics-skill and Computer Use to find my named song in logged-in Suno, copy its lyrics, download its lyric video and lead-vocal stem, explain and pause on any visually confirmed MP4/copied-lyrics conflict, then deliver a validated timestamped CSV lyric package after my decision."

@@ -59,15 +59,29 @@ git -C "${CODEX_HOME:-$HOME/.codex}/skills/sloth-getsunolyrics-skill" pull --ff-
 2. 从歌曲页复制原始歌词，保存为无时间戳的 `lyrics.txt`。
 3. 从可见菜单下载歌词 Video MP4。
 4. 使用 Suno 的 Get Stems/Extract Stems 下载完整歌曲的 Lead Vocal 人声轨。
-5. 用视频歌词高亮确定粗略时间，再用人声活动校准演唱起点。
-6. 输出并校验 CSV、JSON、LRC、SRT 和 VTT。
+5. 先比较复制歌词与 MP4 实际显示的歌词；一致时直接继续原流程。
+6. 若确认 Suno 在 MP4 中改了歌词，列出时间点、复制文本和视频文本，暂停并请用户决定使用哪一版。
+7. 用视频歌词高亮确定粗略时间，再用人声活动校准演唱起点。
+8. 输出并校验 CSV、JSON、LRC、SRT 和 VTT。
 
 人工核对过的 CSV 或 TypeScript 时间轴只用于最后评测，绝不会作为生成输入。这样可以真实检验 Skill 的效果，避免“偷看答案”。
 
+### 歌词不一致时
+
+流水线会先生成 `lyrics-comparison.json` 和便于阅读的 `lyrics-comparison.md`。普通 OCR 错字、漏行或片头标题不会直接当成 Suno 改词；Codex 会先打开报告对应时间点的 MP4 画面核实。
+
+如果画面确实不同，Codex 会停止最终时间轴生成，并把差异逐项列给用户。用户可以选择：
+
+1. 使用 MP4 中实际演唱和显示的歌词（通常最适合游戏、字幕和卡拉 OK）。
+2. 继续保留歌曲页复制的歌词，并接受其中可能包含未演唱文字的警告。
+3. 提供一版修订歌词。
+
+Codex 不会静默替用户选择，也不会直接把未经画面核对的 OCR 当成最终歌词。若没有真实差异，则完全按原有逻辑继续。
+
 ### 实现逻辑
 
-- **Suno 歌词定文本：** 保留原文、顺序、重复句、大小写、标点和分段。
-- **MP4 画面定粗时间：** OCR 观察当前高亮/滚动的歌词行，并与原始歌词按顺序匹配。
+- **先核对文本：** 页面复制歌词是暂定正文；MP4 确认 Suno 实际采用了哪些词。两者真实冲突时由用户决定最终正文。
+- **MP4 画面定粗时间：** OCR 观察当前高亮/滚动的歌词行，并与用户选定的歌词按顺序匹配。
 - **人声校时间：** 在视频给出的窗口内分析 Lead Vocal 的能量和起音，避免时间点落在无人声区域。
 - **不确定性可见：** OCR 漏行、文本不一致、静音边界或大幅移动都会写入警告，不静默猜测。
 - **结果可追溯：** 保存源文件哈希、歌词哈希、参数、中间 OCR 结果、置信度和校验报告。
@@ -81,6 +95,8 @@ song-package/
 ├── song.mp4
 ├── vocals.wav
 ├── lyrics.txt
+├── lyrics-comparison.json
+├── lyrics-comparison.md
 ├── timeline.csv      # 主要交付物
 ├── timeline.json     # 完整证据和置信度
 ├── timeline.lrc
@@ -153,14 +169,20 @@ With Suno logged in, say:
 
 > Use sloth-getsunolyrics-skill for “Song Name” and give me timestamped lyrics as CSV.
 
-Codex finds and verifies the exact version, copies the visible untimed lyrics, downloads the Video and Lead Vocal through Suno's UI, aligns the video highlights to the lyrics, calibrates line starts with vocal activity, and validates CSV/JSON/LRC/SRT/VTT outputs.
+Codex finds and verifies the exact version, copies the visible untimed lyrics, downloads the Video and Lead Vocal through Suno's UI, compares the copied lyrics with the words shown in the MP4, aligns the video highlights after any required user decision, calibrates line starts with vocal activity, and validates CSV/JSON/LRC/SRT/VTT outputs.
 
 A human-reviewed CSV or TypeScript timeline is evaluation-only and is never passed into generation.
 
+### When the lyrics differ
+
+The pipeline first writes `lyrics-comparison.json` and a readable `lyrics-comparison.md`. Codex verifies every candidate against the visible MP4 frame so an OCR typo, missed line, or title card is not mistaken for a Suno rewrite.
+
+If the MP4 visibly contains different lyrics, final timeline generation pauses and Codex shows the user the affected times, copied text, and video text. The user chooses whether to use the words actually performed in the MP4, keep the copied song-page lyrics with explicit warnings, or provide revised lyrics. Codex never chooses silently and never promotes unchecked OCR to final text. With no real difference, the original workflow continues unchanged.
+
 ### How it works
 
-- **Suno lyrics define the text:** wording, order, repeats, case, punctuation, and sections are preserved.
-- **The MP4 supplies coarse timing:** OCR observes highlighted or scrolling lyric lines and order-aligns them to the canonical lyrics.
+- **Text is checked first:** copied page lyrics are provisional; the MP4 confirms what Suno actually generated, and the user resolves any real conflict.
+- **The MP4 supplies coarse timing:** OCR observes highlighted or scrolling lyric lines and order-aligns them to the user-selected lyrics.
 - **The vocal stem calibrates timing:** lead-vocal energy and onsets refine boundaries and reject silent candidates.
 - **Uncertainty stays visible:** missing OCR lines, text mismatches, silent boundaries, and large shifts become review flags.
 - **Outputs are traceable:** source hashes, lyric hashes, parameters, OCR evidence, confidence, and validation are retained.

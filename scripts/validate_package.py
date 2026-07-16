@@ -142,6 +142,15 @@ def main() -> None:
         and 0.0 <= float(cue["confidence"]) <= 1.0
         for cue in cues
     )
+    checks["text_sources"] = all(
+        cue.get("text_source")
+        in {
+            "suno_lyrics_confirmed_by_video",
+            "suno_lyrics_interpolated_from_video",
+            "suno_lyrics_conflict_overridden",
+        }
+        for cue in cues
+    )
     checks["end_timing_sources"] = all(
         cue.get("end_timing_source")
         in {"vocal_offset", "next_line_start_fallback", "media_duration_fallback"}
@@ -163,18 +172,58 @@ def main() -> None:
             timeline.get("lyrics") == manifest.get("lyrics"),
             timeline.get("ocr_language") == manifest.get("language"),
             timeline.get("ocr_interval_ms") == manifest.get("ocr_interval_ms"),
+            timeline.get("lyrics_comparison") == manifest.get("lyrics_comparison"),
             timeline.get("alignment_summary") == manifest.get("alignment_summary"),
+        ]
+    )
+    comparison_metadata = timeline.get("lyrics_comparison") or {}
+    comparison_json = root / str(comparison_metadata.get("report_json", ""))
+    comparison_markdown = root / str(comparison_metadata.get("report_markdown", ""))
+    try:
+        comparison = json.loads(comparison_json.read_text(encoding="utf-8"))
+        comparison_markdown_text = comparison_markdown.read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError):
+        comparison = {}
+        comparison_markdown_text = ""
+    checks["lyrics_comparison_reports"] = all(
+        [
+            comparison_json.is_file(),
+            comparison_markdown.is_file(),
+            bool(comparison_markdown_text.strip()),
+            comparison.get("lyrics_sha256") == manifest.get("lyrics_sha256"),
+            comparison.get("video_sha256") == manifest.get("video_sha256"),
+            comparison.get("status") == comparison_metadata.get("status"),
+            comparison.get("detected_status")
+            == comparison_metadata.get("detected_status"),
+            comparison.get("requested_resolution")
+            == comparison_metadata.get("requested_resolution"),
+            comparison.get("decision_pending")
+            == comparison_metadata.get("decision_pending"),
+            comparison.get("difference_count")
+            == comparison_metadata.get("difference_count"),
+            comparison.get("uncertain_item_count")
+            == comparison_metadata.get("uncertain_item_count"),
+            not comparison.get("decision_pending", False),
+            not comparison_metadata.get("decision_pending", False),
         ]
     )
     summary = timeline.get("alignment_summary") or {}
     confirmed_count = sum(
         cue.get("text_source") == "suno_lyrics_confirmed_by_video" for cue in cues
     )
+    interpolated_count = sum(
+        cue.get("text_source") == "suno_lyrics_interpolated_from_video" for cue in cues
+    )
+    conflict_overridden_count = sum(
+        cue.get("text_source") == "suno_lyrics_conflict_overridden" for cue in cues
+    )
     checks["alignment_summary"] = all(
         [
             summary.get("lyrics_count") == len(cues),
             summary.get("confirmed_count") == confirmed_count,
-            summary.get("interpolated_count") == len(cues) - confirmed_count,
+            summary.get("interpolated_count") == interpolated_count,
+            summary.get("conflict_overridden_count") == conflict_overridden_count,
+            confirmed_count + interpolated_count + conflict_overridden_count == len(cues),
             summary.get("confirmed_ratio") == round(confirmed_count / len(cues), 4)
             if cues
             else False,

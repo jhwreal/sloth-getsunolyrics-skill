@@ -16,6 +16,15 @@ from media_utils import validate_media_pair
 
 
 ROOT = Path(__file__).resolve().parents[1]
+GENERATED_DELIVERABLES = [
+    "timeline.json",
+    "timeline.csv",
+    "timeline.lrc",
+    "timeline.srt",
+    "timeline.vtt",
+    "manifest.json",
+    "validation.json",
+]
 
 
 def run(command: list[str]) -> None:
@@ -53,6 +62,7 @@ def timeline_is_reusable(
     vocals_hash: str,
     language: str,
     interval_ms: int,
+    lyrics_conflict_resolution: str,
 ) -> bool:
     return all(
         [
@@ -62,6 +72,8 @@ def timeline_is_reusable(
             payload.get("vocals_sha256") == vocals_hash,
             payload.get("ocr_language") == language,
             payload.get("ocr_interval_ms") == interval_ms,
+            (payload.get("lyrics_comparison") or {}).get("requested_resolution")
+            == lyrics_conflict_resolution,
         ]
     )
 
@@ -75,6 +87,12 @@ def copy_verified(source: Path, destination: Path, expected_hash: str) -> None:
     shutil.copy2(source, destination)
     if sha256(destination) != expected_hash:
         raise SystemExit(f"copied file failed hash verification: {destination}")
+
+
+def remove_stale_deliverables(output: Path) -> None:
+    """Prevent an older successful package from looking valid after a conflict pause."""
+    for filename in GENERATED_DELIVERABLES:
+        (output / filename).unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -93,6 +111,12 @@ def main() -> None:
         default="suno_stem_download",
     )
     parser.add_argument("--resume", action="store_true", help="reuse valid existing stage outputs")
+    parser.add_argument(
+        "--lyrics-conflict-resolution",
+        choices=["ask", "verified-ocr-error", "use-copied"],
+        default="ask",
+        help="default ask pauses on a visually verifiable MP4/copied-lyrics difference",
+    )
     args = parser.parse_args()
     if not args.video.is_file():
         raise SystemExit(f"video does not exist: {args.video}")
@@ -157,11 +181,12 @@ def main() -> None:
                 vocals_hash=vocals_hash,
                 language=args.language,
                 interval_ms=round(args.interval * 1000),
+                lyrics_conflict_resolution=args.lyrics_conflict_resolution,
             )
     if reusable_timeline:
         print(f"Reusing timeline at {timeline}", flush=True)
     else:
-        run(
+        extraction = subprocess.run(
             [
                 sys.executable,
                 str(ROOT / "scripts" / "extract_timeline.py"),
@@ -179,8 +204,25 @@ def main() -> None:
                 str(work / "timeline"),
                 "--output",
                 str(timeline),
-            ]
+                "--lyrics-conflict-resolution",
+                args.lyrics_conflict_resolution,
+                "--lyrics-comparison-json",
+                str(output / "lyrics-comparison.json"),
+                "--lyrics-comparison-markdown",
+                str(output / "lyrics-comparison.md"),
+            ],
+            check=False,
         )
+        if extraction.returncode == 3:
+            remove_stale_deliverables(output)
+            print(
+                "Lyrics differ between the copied Suno panel and the MP4. "
+                "No final timeline was produced. Verify lyrics-comparison.md against "
+                "the video, then ask the user how to proceed.",
+                file=sys.stderr,
+            )
+            raise SystemExit(3)
+        extraction.check_returncode()
     run(
         [
             sys.executable,
@@ -193,7 +235,7 @@ def main() -> None:
     )
     timeline_payload = json.loads(timeline.read_text(encoding="utf-8"))
     manifest = {
-        "schema_version": 3,
+        "schema_version": 4,
         "pipeline_fingerprint": timeline_payload["pipeline_fingerprint"],
         "title": args.title,
         "source_url": args.source_url,
@@ -209,6 +251,7 @@ def main() -> None:
         "cue_count": len(timeline_payload["cues"]),
         "language": args.language,
         "ocr_interval_ms": timeline_payload["ocr_interval_ms"],
+        "lyrics_comparison": timeline_payload["lyrics_comparison"],
         "alignment_summary": timeline_payload["alignment_summary"],
     }
     write_json_atomic(output / "manifest.json", manifest)

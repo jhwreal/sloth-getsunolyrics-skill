@@ -48,4 +48,17 @@ Use media inspection to confirm:
 
 Run the local media preflight before OCR. If it reports missing streams or a duration mismatch, return to the same song UUID and download again; do not hide the mismatch with a manual offset.
 
+## 6. Handle a lyrics conflict after OCR
+
+The local pipeline compares the copied lyrics with MP4 lyric anchors before vocal calibration. When it produces `lyrics-comparison.md` and pauses:
+
+1. Inspect each reported MP4 timestamp and read the visible active/highlighted line. OCR evidence alone is insufficient.
+2. If the visible words match the copied lyrics, classify the candidate as OCR error and resume with `--lyrics-conflict-resolution verified-ocr-error`; do not ask the user to resolve a recognition mistake.
+3. If the visible MP4 really contains different words, show the user the affected timestamp, copied text, visible video text, and whether the video changed or added a line.
+4. Explain that Suno generated a performance whose MP4 lyrics differ from the lyrics panel, then ask whether to use the MP4 version, keep the copied version, or use user-revised lyrics. Do not continue until the user answers.
+5. For the MP4 choice, preserve the original copy and create a separate visually corrected lyric file. Do not use raw OCR as final text without checking every changed line.
+6. For the copied choice, continue only after explicit confirmation with `--lyrics-conflict-resolution use-copied` and retain all conflict warnings.
+
+If no visually confirmed difference exists, continue the original video-timing and vocal-calibration path unchanged.
+
 If the Suno labels move or change, reason from the visible interface and accessible names instead of guessing old coordinates. Do not use undocumented Suno APIs or derive hidden media URLs.
