@@ -20,6 +20,10 @@ class ProcessSongTests(unittest.TestCase):
             "ocr_language": "en",
             "ocr_interval_ms": 500,
             "lyrics_comparison": {"requested_resolution": "ask"},
+            "whisper_alignment": {
+                "whisper_cli_sha256": "cli",
+                "whisper_model_sha256": "model",
+            },
         }
 
     def reusable(self, **overrides: object) -> bool:
@@ -31,6 +35,8 @@ class ProcessSongTests(unittest.TestCase):
             "language": "en",
             "interval_ms": 500,
             "lyrics_conflict_resolution": "ask",
+            "whisper_cli_hash": "cli",
+            "whisper_model_hash": "model",
         }
         arguments.update(overrides)
         return timeline_is_reusable(self.payload, **arguments)
@@ -45,6 +51,8 @@ class ProcessSongTests(unittest.TestCase):
             ("language", "zh"),
             ("interval_ms", 250),
             ("lyrics_conflict_resolution", "use-copied"),
+            ("whisper_cli_hash", "changed"),
+            ("whisper_model_hash", "changed"),
         ]:
             with self.subTest(key=key):
                 self.assertFalse(self.reusable(**{key: value}))

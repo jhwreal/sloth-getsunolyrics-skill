@@ -13,6 +13,7 @@ import sys
 
 from extract_timeline import pipeline_fingerprint
 from media_utils import validate_media_pair
+from whisper_alignment import resolve_whisper_cli, resolve_whisper_model
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,11 +21,10 @@ GENERATED_DELIVERABLES = [
     "timeline.json",
     "timeline.csv",
     "timeline.lrc",
-    "timeline.srt",
-    "timeline.vtt",
     "manifest.json",
     "validation.json",
 ]
+STALE_INTERVAL_EXPORTS = ["timeline.srt", "timeline.vtt"]
 
 
 def run(command: list[str]) -> None:
@@ -63,6 +63,8 @@ def timeline_is_reusable(
     language: str,
     interval_ms: int,
     lyrics_conflict_resolution: str,
+    whisper_cli_hash: str,
+    whisper_model_hash: str,
 ) -> bool:
     return all(
         [
@@ -74,6 +76,10 @@ def timeline_is_reusable(
             payload.get("ocr_interval_ms") == interval_ms,
             (payload.get("lyrics_comparison") or {}).get("requested_resolution")
             == lyrics_conflict_resolution,
+            (payload.get("whisper_alignment") or {}).get("whisper_cli_sha256")
+            == whisper_cli_hash,
+            (payload.get("whisper_alignment") or {}).get("whisper_model_sha256")
+            == whisper_model_hash,
         ]
     )
 
@@ -91,7 +97,7 @@ def copy_verified(source: Path, destination: Path, expected_hash: str) -> None:
 
 def remove_stale_deliverables(output: Path) -> None:
     """Prevent an older successful package from looking valid after a conflict pause."""
-    for filename in GENERATED_DELIVERABLES:
+    for filename in GENERATED_DELIVERABLES + STALE_INTERVAL_EXPORTS:
         (output / filename).unlink(missing_ok=True)
 
 
@@ -103,6 +109,9 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--language", choices=["auto", "zh", "en"], default="auto")
     parser.add_argument("--interval", type=float, default=0.5)
+    parser.add_argument("--whisper-cli", type=Path, help="whisper.cpp whisper-cli executable")
+    parser.add_argument("--whisper-model", type=Path, help="local whisper.cpp model")
+    parser.add_argument("--whisper-threads", type=int, help="CPU threads for Whisper DTW")
     parser.add_argument("--title")
     parser.add_argument("--source-url")
     parser.add_argument(
@@ -130,6 +139,10 @@ def main() -> None:
     video_source = args.video.resolve()
     vocal_source = args.vocals.resolve()
     lyrics_source = args.lyrics.resolve()
+    whisper_cli = resolve_whisper_cli(args.whisper_cli)
+    whisper_model = resolve_whisper_model(args.whisper_model)
+    whisper_cli_hash = sha256(whisper_cli)
+    whisper_model_hash = sha256(whisper_model)
     print("Preflight: validating media streams and durations", flush=True)
     validate_media_pair(video_source, vocal_source)
     video_hash = sha256(video_source)
@@ -182,6 +195,8 @@ def main() -> None:
                 language=args.language,
                 interval_ms=round(args.interval * 1000),
                 lyrics_conflict_resolution=args.lyrics_conflict_resolution,
+                whisper_cli_hash=whisper_cli_hash,
+                whisper_model_hash=whisper_model_hash,
             )
     if reusable_timeline:
         print(f"Reusing timeline at {timeline}", flush=True)
@@ -202,6 +217,10 @@ def main() -> None:
                 str(args.interval),
                 "--work-dir",
                 str(work / "timeline"),
+                "--whisper-cli",
+                str(whisper_cli),
+                "--whisper-model",
+                str(whisper_model),
                 "--output",
                 str(timeline),
                 "--lyrics-conflict-resolution",
@@ -210,7 +229,12 @@ def main() -> None:
                 str(output / "lyrics-comparison.json"),
                 "--lyrics-comparison-markdown",
                 str(output / "lyrics-comparison.md"),
-            ],
+            ]
+            + (
+                ["--whisper-threads", str(args.whisper_threads)]
+                if args.whisper_threads is not None
+                else []
+            ),
             check=False,
         )
         if extraction.returncode == 3:
@@ -235,7 +259,7 @@ def main() -> None:
     )
     timeline_payload = json.loads(timeline.read_text(encoding="utf-8"))
     manifest = {
-        "schema_version": 4,
+        "schema_version": 5,
         "pipeline_fingerprint": timeline_payload["pipeline_fingerprint"],
         "title": args.title,
         "source_url": args.source_url,
@@ -246,13 +270,14 @@ def main() -> None:
         "lyrics": "lyrics.txt",
         "lyrics_sha256": lyrics_hash,
         "timeline": "timeline.json",
-        "exports": ["timeline.csv", "timeline.lrc", "timeline.srt", "timeline.vtt"],
+        "exports": ["timeline.csv", "timeline.lrc"],
         "media_duration_ms": timeline_payload["media_duration_ms"],
         "cue_count": len(timeline_payload["cues"]),
         "language": args.language,
         "ocr_interval_ms": timeline_payload["ocr_interval_ms"],
         "lyrics_comparison": timeline_payload["lyrics_comparison"],
         "alignment_summary": timeline_payload["alignment_summary"],
+        "whisper_alignment": timeline_payload["whisper_alignment"],
     }
     write_json_atomic(output / "manifest.json", manifest)
     run(

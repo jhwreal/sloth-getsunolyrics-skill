@@ -11,8 +11,8 @@
 CSV 可直接用于游戏歌词、卡拉 OK、字幕、视频剪辑、音乐可视化等场景：
 
 ```csv
-id,section,start_time,end_time,lyric
-lyric-01,Verse 1,00:12.340,00:15.670,第一句歌词
+id,section,start_time,lyric
+lyric-01,Verse 1,00:12.340,第一句歌词
 ```
 
 ### 日常使用的前置条件
@@ -24,7 +24,7 @@ Skill 安装完成后，普通用户只需要：
 3. 如果 Suno 的人声分离需要积分，账户内有足够积分。
 4. 告诉 Codex 准确的歌曲名称。
 
-不需要安装 Demucs，不需要下载 AI 模型，不需要手工准备 CSV，也不需要额外的浏览器扩展。Computer Use 由 Codex Desktop 提供。若 Suno 在执行前显示扣积分、付费或升级，Codex 会在最终确认按钮前说明具体费用并征得同意。
+不需要安装 Demucs，不需要手工准备 CSV，也不需要额外的浏览器扩展。Computer Use 由 Codex Desktop 提供；高精度时间轴会自动发现 Codex 运行环境中已有的本地 `whisper-cli` 与 whisper.cpp 模型（推荐 large-v3）。普通用户不需要自己配置；若运行环境未提供它们，Skill 会明确停止，而不会静默退化成秒级误差。若 Suno 在执行前显示扣积分、付费或升级，Codex 会在最终确认按钮前说明具体费用并征得同意。
 
 ### 安装
 
@@ -61,8 +61,8 @@ git -C "${CODEX_HOME:-$HOME/.codex}/skills/sloth-getsunolyrics-skill" pull --ff-
 4. 使用 Suno 的 Get Stems/Extract Stems 下载完整歌曲的 Lead Vocal 人声轨。
 5. 先比较复制歌词与 MP4 实际显示的歌词；一致时直接继续原流程。
 6. 若确认 Suno 在 MP4 中改了歌词，列出时间点、复制文本和视频文本，暂停并请用户决定使用哪一版。
-7. 用视频歌词高亮确定粗略时间，再用人声活动校准演唱起点。
-8. 输出并校验 CSV、JSON、LRC、SRT 和 VTT。
+7. 用视频歌词高亮确定粗略顺序，再用歌词提示的 Whisper DTW 逐字时间和人声活动校准演唱起点。
+8. 输出并校验网易云四列格式的 start-only CSV、JSON 和 LRC。
 
 人工核对过的 CSV 或 TypeScript 时间轴只用于最后评测，绝不会作为生成输入。这样可以真实检验 Skill 的效果，避免“偷看答案”。
 
@@ -82,11 +82,12 @@ Codex 不会静默替用户选择，也不会直接把未经画面核对的 OCR 
 
 - **先核对文本：** 页面复制歌词是暂定正文；MP4 确认 Suno 实际采用了哪些词。两者真实冲突时由用户决定最终正文。
 - **MP4 画面定粗时间：** OCR 观察当前高亮/滚动的歌词行，并与用户选定的歌词按顺序匹配。
-- **人声校时间：** 在视频给出的窗口内分析 Lead Vocal 的能量和起音，避免时间点落在无人声区域。
+- **DTW 定精确起点：** 用规范歌词提示本地 whisper.cpp，关闭 Flash Attention 后启用真正的逐字 DTW；识别结果只用于时间，不改歌词正文。
+- **人声否决异常：** 若 DTW 时间回跳到所属 Whisper 句段之前，使用 Lead Vocal onset 否决并修正；不会把普通能量峰值强行替换掉可信的逐字边界。
 - **不确定性可见：** OCR 漏行、文本不一致、静音边界或大幅移动都会写入警告，不静默猜测。
 - **结果可追溯：** 保存源文件哈希、歌词哈希、参数、中间 OCR 结果、置信度和校验报告。
 
-内部统一使用整数毫秒和半开区间 `[start_ms, end_ms)`。当前两首人工样本的验收线是行级起点中位误差小于 500 ms；更严格的工程目标是中位数不超过 200 ms、95 分位不超过 500 ms。只有在独立人工答案上测量后才会报告达标。
+内部统一使用整数毫秒，只保留每行实际开唱的 `start_ms`。当前维护的精度回归要求每一行绝对误差都不超过 500 ms，而不是只让中位数或 p95 达标。人工答案只会在盲生成完成后用于独立评测，绝不会进入生成 prompt、缓存或候选选择。
 
 ### 输出目录
 
@@ -100,8 +101,6 @@ song-package/
 ├── timeline.csv      # 主要交付物
 ├── timeline.json     # 完整证据和置信度
 ├── timeline.lrc
-├── timeline.srt
-├── timeline.vtt
 ├── manifest.json
 ├── validation.json
 └── work/             # OCR 等可复核中间产物
@@ -121,7 +120,7 @@ python3 /absolute/path/to/sloth-getsunolyrics-skill/scripts/process_song.py \
   --output-dir /path/song-package
 ```
 
-当前实现使用 FFmpeg/FFprobe 读取媒体，并在 macOS 使用 Vision OCR。开发或自行运行脚本时需自行准备这些运行环境；通过已配置好的 Codex Skill 使用时，不需要普通用户手工安装它们。
+当前实现使用 FFmpeg/FFprobe 读取媒体，在 macOS 使用 Vision OCR，并用 whisper.cpp DTW 生成内容感知的逐字起点。开发者直接运行脚本时需准备 `whisper-cli` 和本地模型，或通过 `--whisper-cli`、`--whisper-model`/对应环境变量指定；通过已配置好的 Codex Skill 使用时不需要普通用户手工安装。
 
 ## English
 
@@ -140,7 +139,7 @@ Once the Skill is installed, the user only needs:
 3. Enough Suno credits if stem extraction consumes credits.
 4. The exact song name.
 
-No Demucs, model download, hand-written CSV, or separate browser extension is required. Computer Use is provided by Codex Desktop. If Suno displays a credit charge, payment, or upgrade, Codex pauses before the final action and asks for confirmation with the visible cost.
+No Demucs, hand-written CSV, or separate browser extension is required. Computer Use is provided by Codex Desktop. High-precision timing auto-discovers the local `whisper-cli` and whisper.cpp model provisioned in the Codex runtime (large-v3 recommended); if they are absent, the Skill stops explicitly instead of silently returning second-scale timing. If Suno displays a credit charge, payment, or upgrade, Codex pauses before the final action and asks for confirmation with the visible cost.
 
 ### Installation
 
@@ -169,7 +168,7 @@ With Suno logged in, say:
 
 > Use sloth-getsunolyrics-skill for “Song Name” and give me timestamped lyrics as CSV.
 
-Codex finds and verifies the exact version, copies the visible untimed lyrics, downloads the Video and Lead Vocal through Suno's UI, compares the copied lyrics with the words shown in the MP4, aligns the video highlights after any required user decision, calibrates line starts with vocal activity, and validates CSV/JSON/LRC/SRT/VTT outputs.
+Codex finds and verifies the exact version, copies the visible untimed lyrics, downloads the Video and Lead Vocal through Suno's UI, compares the copied lyrics with the words shown in the MP4, order-aligns the video highlights after any required user decision, calibrates line starts with lyric-prompted Whisper DTW plus vocal evidence, and validates start-only CSV/JSON/LRC outputs.
 
 A human-reviewed CSV or TypeScript timeline is evaluation-only and is never passed into generation.
 
@@ -183,14 +182,15 @@ If the MP4 visibly contains different lyrics, final timeline generation pauses a
 
 - **Text is checked first:** copied page lyrics are provisional; the MP4 confirms what Suno actually generated, and the user resolves any real conflict.
 - **The MP4 supplies coarse timing:** OCR observes highlighted or scrolling lyric lines and order-aligns them to the user-selected lyrics.
-- **The vocal stem calibrates timing:** lead-vocal energy and onsets refine boundaries and reject silent candidates.
+- **DTW supplies precise starts:** local whisper.cpp runs with the canonical lyric sequence as a prompt and genuine token DTW; recognized words never replace canonical text.
+- **The vocal stem rejects impossible timing:** lead-vocal onsets repair DTW backtracks that fall before their containing Whisper segment without overriding valid token boundaries.
 - **Uncertainty stays visible:** missing OCR lines, text mismatches, silent boundaries, and large shifts become review flags.
 - **Outputs are traceable:** source hashes, lyric hashes, parameters, OCR evidence, confidence, and validation are retained.
 
-Internal timing uses integer milliseconds and half-open intervals `[start_ms, end_ms)`. The two current human-reviewed fixtures use a median start-error acceptance line below 500 ms; the stricter engineering target is median ≤200 ms and p95 ≤500 ms. Accuracy claims are made only after comparison with an independent human-reviewed timeline.
+Internal timing uses integer milliseconds and retains only each line's actual singing `start_ms`. The maintained regression requires every line—not merely the median or p95—to have absolute start error at or below 500 ms. Reviewed answers are loaded only after blind generation for evaluation and never enter prompts, caches, or candidate selection.
 
 ### Developer note
 
-The default novice flow does not use local vocal separation. `scripts/separate_vocals.py` and `requirements-demucs.txt` remain only as an optional offline developer fallback. Developers running the local pipeline directly need FFmpeg/FFprobe and macOS Vision OCR available.
+The default novice flow does not use local vocal separation. `scripts/separate_vocals.py` and `requirements-demucs.txt` remain only as an optional offline developer fallback. Developers running the local pipeline directly need FFmpeg/FFprobe, macOS Vision OCR, `whisper-cli`, and a local whisper.cpp DTW-capable model.
 
 See [SKILL.md](SKILL.md) for the agent workflow and [references/timeline-schema.md](references/timeline-schema.md) for output semantics.

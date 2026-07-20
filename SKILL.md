@@ -1,17 +1,18 @@
 ---
 name: sloth-getsunolyrics-skill
-description: Use Computer Use to find a named song in the user's logged-in Suno account, copy its lyrics, download its lyric video and Suno-separated lead vocal, detect and explain any difference between the copied lyrics and the words actually shown in the MP4, then generate a validated timestamped lyric CSV plus JSON/LRC/SRT/VTT after any required user decision. Use when a user wants reusable lyric timing for games, karaoke, subtitles, editing, or visualization, or when evaluating generated timing against a separate human-reviewed gold timeline.
+description: Use Computer Use to find a named song in the user's logged-in Suno account, copy its lyrics, download its lyric video and Suno-separated lead vocal, detect and explain any difference between the copied lyrics and the words actually shown in the MP4, then generate a validated millisecond start-time CSV plus JSON/LRC after any required user decision. Use when a user wants reusable lyric starts for games, karaoke, editing, or visualization, or when evaluating generated timing against a separate human-reviewed gold timeline.
 ---
 
 # Sloth Get Suno Lyrics
 
 Turn a Suno song name into a timestamped lyric package. The normal user supplies only the song name and has Suno open and logged in. Do not ask the user to install Demucs or manually prepare media.
 
-Use three independent signals:
+Keep these evidence roles separate:
 
 1. Lyrics copied from the visible Suno song page are the provisional text, line order, case, punctuation, and repetitions.
 2. The lyric MP4 supplies visible highlight/scroll timing and confirms whether Suno actually used that text. Suno can generate different words and show those changed words in the MP4.
-3. The Suno lead-vocal stem supplies vocal activity used to calibrate line starts and reject boundaries that land in silence.
+3. Lyric-prompted, offline whisper.cpp DTW supplies content-aware token starts. The supplied lyric remains canonical; recognized text is timing evidence only.
+4. The Suno lead-vocal stem supplies vocal activity used to reject impossible DTW backtracks and refine the containing Whisper segment boundary.
 
 When the copied lyrics and visually confirmed MP4 lyrics differ, neither version becomes canonical automatically. Explain the situation and exact differences, then wait for the user's decision.
 
@@ -25,8 +26,9 @@ Require only:
 - Chrome open with the user's Suno account already logged in.
 - The named song visible to that account, with lyrics, Video download, and stem extraction access.
 - Enough Suno credits or plan entitlement if Suno charges for stem extraction.
+- A Codex runtime with `whisper-cli` and a local whisper.cpp model available; large-v3 is the recommended precision backend. The script auto-discovers the configured executable and model.
 
-Do not request the user's password, cookie, or token. Do not ask a normal user to install a browser extension, Demucs, Python packages, or audio models. If Suno shows a credit charge, purchase, or upgrade before the final extraction action, show the exact cost and ask for confirmation at that point.
+Do not request the user's password, cookie, or token. Do not ask a normal user to install a browser extension, Demucs, Python packages, or audio models. If the Codex runtime lacks the local precision backend, report the environment prerequisite instead of silently returning a low-precision timeline. If Suno shows a credit charge, purchase, or upgrade before the final extraction action, show the exact cost and ask for confirmation at that point.
 
 ## Acquire the song with Computer Use
 
@@ -78,15 +80,15 @@ python3 /absolute/path/to/sloth-getsunolyrics-skill/scripts/process_song.py \
 
 Use `--language zh` or `--language en` when known. Use `--interval 0.25` for rapidly changing lyrics; the default is `0.5` seconds. The command rejects missing streams, mismatched media durations, empty vocals, and invalid lyric files before expensive OCR work.
 
-Use `--resume` after interruption. Timeline reuse requires matching media and lyric hashes, OCR language, sampling interval, and pipeline fingerprint. Valid raw OCR is cached separately, so an algorithm update can reuse observations while still rebuilding the timeline. Never manually copy an old `timeline.json` into a new song package.
+Use `--resume` after interruption. Timeline reuse requires matching media and lyric hashes, OCR language, sampling interval, pipeline fingerprint, Whisper executable hash, and model hash. OCR and DTW transcripts are cached separately by content and parameters, so an algorithm update can reuse observations while still rebuilding the timeline. Never manually copy an old `timeline.json` into a new song package.
 
 Keep the default `--lyrics-conflict-resolution ask`. Only use an override after the visual checks and decision rules above. A conflict pause is an expected control-flow result, not a failed song extraction.
 
 The primary deliverable is `timeline.csv`:
 
 ```csv
-id,section,start_time,end_time,lyric
-lyric-01,Verse 1,00:12.340,00:15.670,歌词内容
+id,section,start_time,lyric
+lyric-01,Verse 1,00:12.340,歌词内容
 ```
 
 The package also contains:
@@ -101,8 +103,6 @@ song-package/
 ├── timeline.csv
 ├── timeline.json
 ├── timeline.lrc
-├── timeline.srt
-├── timeline.vtt
 ├── vocals.separation.json
 ├── manifest.json
 ├── validation.json
@@ -119,9 +119,12 @@ Preserve `work/` until review finishes. It contains OCR frames and observations 
 - Align canonical lyric lines to OCR anchors in order. Do not replace lyrics with OCR guesses.
 - Interpolate a line only when OCR misses it; add `lyrics-line-interpolated-from-video`.
 - Add `low-video-lyrics-similarity` when the displayed video text does not sufficiently confirm the copied lyric.
-- Calibrate each video boundary within a bounded window using vocal onsets and energy.
-- Use a detected vocal offset for `end_ms` when a reliable silent gap exists; otherwise record the next-line fallback explicitly.
-- Keep integer milliseconds, half-open intervals `[start_ms, end_ms)`, and strictly increasing starts.
+- Run whisper.cpp offline with the canonical lyric sequence as a prompt, `-mc 0`, DTW enabled, and Flash Attention disabled (`-nfa`). Flash Attention otherwise disables DTW and leaves `t_dtw == -1`.
+- Order-align canonical lyric groups with recognized segments. When one segment contains multiple lyric lines, map later line boundaries to the corresponding token inside that segment instead of reusing its first timestamp.
+- Treat recognized words only as timing evidence. Never replace canonical lyrics with Whisper output.
+- Reject a DTW token start that is more than 500 ms before its containing Whisper segment start; that is a detectable alignment backtrack. Refine the raw segment boundary with the nearest forward vocal onset, then preserve the rejection flag.
+- Use MP4 timing as a sequence/window prior and audit signal, not as an unconditional fixed offset. Lyrics can be pre-displayed and video transitions can lag the voice.
+- Keep integer milliseconds and strictly increasing starts. The output contract is start-only; do not synthesize end times, SRT, or VTT.
 - Preserve warnings for silence, large shifts, overlays, repeats, harmony, and separation artifacts.
 
 Read [references/timeline-schema.md](references/timeline-schema.md) before consuming JSON.
@@ -135,17 +138,18 @@ python3 /absolute/path/to/sloth-getsunolyrics-skill/scripts/validate_package.py 
   --package-dir /absolute/path/song-package
 ```
 
-Confirm the lyrics, MP4, and vocal all belong to the same song; media durations are aligned; CSV/JSON/LRC/SRT/VTT contain the same text and times; time intervals are legal; and every warning is reported. A completed package must have `lyrics_comparison.decision_pending == false`. Inspect `alignment_summary`: interpolated lines, conflict-overridden lines, or a low confirmed ratio require human review even when structural validation passes.
+Confirm the lyrics, MP4, and vocal all belong to the same song; media durations are aligned; CSV/JSON/LRC contain the same text and starts; no interval export remains; starts are legal and strictly increasing; and every warning is reported. A completed package must have `lyrics_comparison.decision_pending == false`. Inspect `alignment_summary`: interpolated lines, conflict-overridden lines, missing Whisper matches, or a low confirmed ratio require human review even when structural validation passes.
 
 If a human-reviewed answer exists, evaluate only after generation:
 
 ```bash
 python3 /absolute/path/to/sloth-getsunolyrics-skill/scripts/evaluate_timeline.py \
   --generated /path/song-package/timeline.json \
-  --gold-csv /path/reviewed.csv
+  --gold-csv /path/reviewed.csv \
+  --max-start-error-ms 500
 ```
 
-Use `--gold-typescript` for a TypeScript reference. Report text match rate, start-time median absolute error, 95th percentile error, end-time error when the gold data provides ends, and low-confidence ratio. Never claim accuracy improvement without these metrics.
+Use `--gold-typescript` for a TypeScript reference. Report exact text pairing, maximum/median/95th-percentile start error, signed bias, and the fraction within 500 ms. For the maintained precision regression, every paired line—not merely the median or p95—must be within 500 ms. Never claim accuracy improvement without these metrics, and never let the reviewed answer enter the generation cache or prompt.
 
 ## Developer-only fallback
 

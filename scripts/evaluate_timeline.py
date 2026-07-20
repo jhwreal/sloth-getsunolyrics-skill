@@ -29,14 +29,12 @@ def load_csv(path: Path) -> list[dict]:
     for row in rows:
         text = row.get("english_lyric") or row.get("text") or row.get("lyric")
         start = row.get("start_time") or row.get("start_ms")
-        end = row.get("end_time") or row.get("end_ms")
         if text is None or start is None:
             raise SystemExit("gold CSV needs a text/lyric column and start_time/start_ms")
         cues.append(
             {
                 "text": text,
                 "start_ms": parse_time(start) if ":" in start else int(start),
-                "end_ms": parse_time(end) if end and ":" in end else int(end or 0),
             }
         )
     return cues
@@ -53,7 +51,6 @@ def load_typescript(path: Path) -> list[dict]:
             {
                 "text": line or lines,
                 "start_ms": int(start.replace("_", "")),
-                "end_ms": int(end.replace("_", "")) if end else 0,
             }
         )
     if not cues:
@@ -125,15 +122,22 @@ def timing_metrics(
         abs(int(actual[actual_field]) - int(expected[expected_field]))
         for actual, expected in pairs
     ]
+    signed_errors = [
+        int(actual[actual_field]) - int(expected[expected_field])
+        for actual, expected in pairs
+    ]
     return {
         "cue_count": len(errors),
+        "max_abs_error_ms": max(errors),
         "median_abs_error_ms": round(statistics.median(errors), 2),
         "mean_abs_error_ms": round(statistics.fmean(errors), 2),
+        "mean_signed_error_ms": round(statistics.fmean(signed_errors), 2),
         "p90_abs_error_ms": round(percentile(errors, 0.9), 2),
         "p95_abs_error_ms": round(percentile(errors, 0.95), 2),
         "within_500ms_ratio": round(sum(error <= 500 for error in errors) / len(errors), 4),
         "within_1000ms_ratio": round(sum(error <= 1000 for error in errors) / len(errors), 4),
         "within_1500ms_ratio": round(sum(error <= 1500 for error in errors) / len(errors), 4),
+        "all_within_500ms": all(error <= 500 for error in errors),
     }
 
 
@@ -144,6 +148,11 @@ def main() -> None:
     gold.add_argument("--gold-csv", type=Path)
     gold.add_argument("--gold-typescript", type=Path)
     parser.add_argument("--output", type=Path, help="optional JSON report path")
+    parser.add_argument(
+        "--max-start-error-ms",
+        type=int,
+        help="exit nonzero unless every paired start is within this absolute error",
+    )
     args = parser.parse_args()
 
     generated = json.loads(args.generated.read_text(encoding="utf-8"))["cues"]
@@ -156,11 +165,7 @@ def main() -> None:
         difflib.SequenceMatcher(None, normalize(actual["text"]), normalize(gold["text"])).ratio()
         for actual, gold in pairs
     ]
-    end_pairs = [
-        (actual, gold)
-        for actual, gold in pairs
-        if int(gold.get("end_ms") or 0) > int(gold["start_ms"])
-    ]
+    start_timing = timing_metrics(pairs, "start_ms")
     report = {
         "generated_cues": len(generated),
         "gold_cues": len(expected),
@@ -172,12 +177,11 @@ def main() -> None:
         ),
         "text_similarity_at_least_0_9": sum(value >= 0.9 for value in similarities),
         "video_timing": timing_metrics(pairs, "video_start_ms"),
-        "vocal_calibrated_timing": timing_metrics(pairs, "start_ms"),
-        "end_timing": timing_metrics(end_pairs, "end_ms", "end_ms") if end_pairs else None,
+        "start_timing": start_timing,
         "flag_counts": dict(
             sorted(Counter(flag for cue in generated for flag in cue.get("flags", [])).items())
         ),
-        "largest_vocal_errors": sorted(
+        "largest_start_errors": sorted(
             [
                 {
                     "index": index + 1,
@@ -185,12 +189,12 @@ def main() -> None:
                     "gold_start_ms": gold["start_ms"],
                     "video_start_ms": actual["video_start_ms"],
                     "start_ms": actual["start_ms"],
-                    "vocal_abs_error_ms": abs(int(actual["start_ms"]) - int(gold["start_ms"])),
+                    "start_abs_error_ms": abs(int(actual["start_ms"]) - int(gold["start_ms"])),
                     "flags": actual.get("flags", []),
                 }
                 for index, (actual, gold) in enumerate(pairs)
             ],
-            key=lambda item: item["vocal_abs_error_ms"],
+            key=lambda item: item["start_abs_error_ms"],
             reverse=True,
         )[:10],
     }
@@ -199,6 +203,13 @@ def main() -> None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered, encoding="utf-8")
     print(rendered, end="")
+    if args.max_start_error_ms is not None:
+        complete_pairing = len(pairs) == len(generated) == len(expected)
+        if (
+            not complete_pairing
+            or int(start_timing["max_abs_error_ms"]) > args.max_start_error_ms
+        ):
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

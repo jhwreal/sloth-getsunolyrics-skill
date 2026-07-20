@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate media hashes, durations, cues, and exports in a lyric package."""
+"""Validate media hashes, start-only cues, and exports in a lyric package."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from media_utils import probe_media
 
 CSV_TIME_RE = re.compile(r"^(\d{2,}):(\d{2})\.(\d{3})$")
 LRC_RE = re.compile(r"^\[(\d+):(\d{2})\.(\d{2})\](.*)$")
-SUBTITLE_TIME_RE = re.compile(r"^(\d{2}):(\d{2}):(\d{2})[,.](\d{3})$")
 
 
 def sha256(path: Path) -> str:
@@ -37,16 +36,6 @@ def parse_csv_time(value: str) -> int:
     return minutes * 60_000 + seconds * 1000 + milliseconds
 
 
-def parse_subtitle_time(value: str) -> int:
-    match = SUBTITLE_TIME_RE.fullmatch(value)
-    if not match:
-        raise ValueError(f"invalid subtitle time: {value}")
-    hours, minutes, seconds, milliseconds = map(int, match.groups())
-    if minutes >= 60 or seconds >= 60:
-        raise ValueError(f"invalid subtitle time: {value}")
-    return hours * 3_600_000 + minutes * 60_000 + seconds * 1000 + milliseconds
-
-
 def parse_lrc(path: Path) -> list[dict]:
     cues = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -62,31 +51,6 @@ def parse_lrc(path: Path) -> list[dict]:
             {
                 "start_ms": int(minutes) * 60_000 + int(seconds) * 1000 + int(centiseconds) * 10,
                 "text": text,
-            }
-        )
-    return cues
-
-
-def parse_numbered_subtitles(path: Path, *, webvtt: bool = False) -> list[dict]:
-    content = path.read_text(encoding="utf-8").replace("\r\n", "\n").strip()
-    blocks = re.split(r"\n{2,}", content) if content else []
-    if webvtt:
-        if not blocks or blocks[0].strip() != "WEBVTT":
-            raise ValueError("WebVTT file is missing its WEBVTT header")
-        blocks = blocks[1:]
-    cues = []
-    for expected_index, block in enumerate(blocks, 1):
-        lines = block.splitlines()
-        if len(lines) < 3 or lines[0].strip() != str(expected_index):
-            raise ValueError(f"invalid subtitle block {expected_index}")
-        timing = re.fullmatch(r"(\S+)\s+-->\s+(\S+)", lines[1].strip())
-        if not timing:
-            raise ValueError(f"invalid subtitle timing at block {expected_index}")
-        cues.append(
-            {
-                "start_ms": parse_subtitle_time(timing.group(1)),
-                "end_ms": parse_subtitle_time(timing.group(2)),
-                "text": "\n".join(lines[2:]),
             }
         )
     return cues
@@ -125,10 +89,11 @@ def main() -> None:
     )
     cues = timeline.get("cues") or []
     checks["cue_count"] = bool(cues) and len(cues) == int(manifest["cue_count"])
-    checks["cue_intervals"] = all(
-        0 <= int(cue["start_ms"]) < int(cue["end_ms"]) <= int(timeline["media_duration_ms"])
+    checks["cue_starts"] = all(
+        0 <= int(cue["start_ms"]) < int(timeline["media_duration_ms"])
         for cue in cues
     )
+    checks["start_only_schema"] = all("end_ms" not in cue for cue in cues)
     checks["cue_order"] = all(
         int(cues[index]["start_ms"]) < int(cues[index + 1]["start_ms"])
         for index in range(len(cues) - 1)
@@ -151,11 +116,7 @@ def main() -> None:
         }
         for cue in cues
     )
-    checks["end_timing_sources"] = all(
-        cue.get("end_timing_source")
-        in {"vocal_offset", "next_line_start_fallback", "media_duration_fallback"}
-        for cue in cues
-    )
+    checks["timing_sources"] = all(isinstance(cue.get("timing_source"), str) for cue in cues)
     canonical_lyrics = parse_lyrics(lyrics)
     checks["timeline_text_matches_lyrics"] = [cue.get("text") for cue in cues] == [
         cue["text"] for cue in canonical_lyrics
@@ -174,6 +135,7 @@ def main() -> None:
             timeline.get("ocr_interval_ms") == manifest.get("ocr_interval_ms"),
             timeline.get("lyrics_comparison") == manifest.get("lyrics_comparison"),
             timeline.get("alignment_summary") == manifest.get("alignment_summary"),
+            timeline.get("whisper_alignment") == manifest.get("whisper_alignment"),
         ]
     )
     comparison_metadata = timeline.get("lyrics_comparison") or {}
@@ -223,6 +185,10 @@ def main() -> None:
             summary.get("confirmed_count") == confirmed_count,
             summary.get("interpolated_count") == interpolated_count,
             summary.get("conflict_overridden_count") == conflict_overridden_count,
+            summary.get("whisper_match_count") == len(cues),
+            int(summary.get("dtw_token_start_count", -1))
+            + int(summary.get("rejected_dtw_backtrack_count", -1))
+            == len(cues),
             confirmed_count + interpolated_count + conflict_overridden_count == len(cues),
             summary.get("confirmed_ratio") == round(confirmed_count / len(cues), 4)
             if cues
@@ -232,21 +198,18 @@ def main() -> None:
     checks["manifest_exports"] = manifest.get("exports") == [
         "timeline.csv",
         "timeline.lrc",
-        "timeline.srt",
-        "timeline.vtt",
     ]
+    checks["no_interval_exports"] = not (root / "timeline.srt").exists() and not (
+        root / "timeline.vtt"
+    ).exists()
     checks["timeline_duration_matches_media"] = int(timeline["media_duration_ms"]) == min(
         video_duration, vocal_duration
     )
     try:
         lrc_rows = parse_lrc(root / "timeline.lrc")
-        srt_rows = parse_numbered_subtitles(root / "timeline.srt")
-        vtt_rows = parse_numbered_subtitles(root / "timeline.vtt", webvtt=True)
     except (OSError, ValueError):
-        lrc_rows, srt_rows, vtt_rows = [], [], []
+        lrc_rows = []
     lrc_count = len(lrc_rows)
-    srt_count = len(srt_rows)
-    vtt_count = len(vtt_rows)
     try:
         with (root / "timeline.csv").open(encoding="utf-8-sig", newline="") as source:
             reader = csv.DictReader(source)
@@ -260,10 +223,9 @@ def main() -> None:
         "id",
         "section",
         "start_time",
-        "end_time",
         "lyric",
     ]
-    checks["export_cue_counts"] = lrc_count == srt_count == vtt_count == csv_count == len(cues)
+    checks["export_cue_counts"] = lrc_count == csv_count == len(cues)
     try:
         checks["csv_matches_json"] = all(
             [
@@ -271,7 +233,6 @@ def main() -> None:
                 row.get("section") == (cue.get("section") or ""),
                 row.get("lyric") == str(cue["text"]),
                 parse_csv_time(row.get("start_time", "")) == int(cue["start_ms"]),
-                parse_csv_time(row.get("end_time", "")) == int(cue["end_ms"]),
             ]
             for index, (row, cue) in enumerate(zip(csv_rows, cues), 1)
         )
@@ -282,18 +243,6 @@ def main() -> None:
         and row["start_ms"] == (int(cue["start_ms"]) // 10) * 10
         for row, cue in zip(lrc_rows, cues)
     ) and len(lrc_rows) == len(cues)
-    checks["srt_matches_json"] = all(
-        row["text"] == str(cue["text"])
-        and row["start_ms"] == int(cue["start_ms"])
-        and row["end_ms"] == int(cue["end_ms"])
-        for row, cue in zip(srt_rows, cues)
-    ) and len(srt_rows) == len(cues)
-    checks["vtt_matches_json"] = all(
-        row["text"] == str(cue["text"])
-        and row["start_ms"] == int(cue["start_ms"])
-        and row["end_ms"] == int(cue["end_ms"])
-        for row, cue in zip(vtt_rows, cues)
-    ) and len(vtt_rows) == len(cues)
     report = {
         "valid": all(checks.values()),
         "checks": checks,
@@ -303,8 +252,6 @@ def main() -> None:
         "export_cue_counts": {
             "csv": csv_count,
             "lrc": lrc_count,
-            "srt": srt_count,
-            "vtt": vtt_count,
         },
     }
     rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n"

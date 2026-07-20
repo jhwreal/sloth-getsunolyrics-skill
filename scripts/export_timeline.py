@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export a Sloth lyric timeline JSON to CSV, LRC, SRT, and WebVTT."""
+"""Export a start-only lyric timeline to Netease-style CSV and LRC."""
 
 from __future__ import annotations
 
@@ -22,13 +22,6 @@ def lrc_time(milliseconds: int) -> str:
     return f"{minutes:02d}:{seconds:02d}.{millis // 10:02d}"
 
 
-def subtitle_time(milliseconds: int, separator: str) -> str:
-    hours, remainder = divmod(max(0, milliseconds), 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    seconds, millis = divmod(remainder, 1000)
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}{separator}{millis:03d}"
-
-
 def csv_time(milliseconds: int) -> str:
     minutes, remainder = divmod(max(0, milliseconds), 60_000)
     seconds, millis = divmod(remainder, 1000)
@@ -43,9 +36,8 @@ def validate(payload: dict) -> list[dict]:
     previous = -1
     for cue in cues:
         start = int(cue["start_ms"])
-        end = int(cue["end_ms"])
-        if not 0 <= start < end <= duration:
-            raise SystemExit(f"invalid cue interval at index {cue.get('index')}: {start}..{end}")
+        if not 0 <= start < duration:
+            raise SystemExit(f"invalid cue start at index {cue.get('index')}: {start}")
         if start <= previous:
             raise SystemExit(f"cue starts are not strictly increasing at index {cue.get('index')}")
         previous = start
@@ -63,39 +55,21 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     lrc = "\n".join(f"[{lrc_time(int(cue['start_ms']))}]{cue['text']}" for cue in cues) + "\n"
-    srt_blocks = []
-    vtt_blocks = ["WEBVTT", ""]
-    for number, cue in enumerate(cues, 1):
-        start = int(cue["start_ms"])
-        end = int(cue["end_ms"])
-        text = str(cue["text"])
-        srt_blocks.append(
-            f"{number}\n{subtitle_time(start, ',')} --> {subtitle_time(end, ',')}\n{text}\n"
-        )
-        vtt_blocks.append(
-            f"{number}\n{subtitle_time(start, '.')} --> {subtitle_time(end, '.')}\n{text}\n"
-        )
-
-    outputs = {
-        ".lrc": lrc,
-        ".srt": "\n".join(srt_blocks),
-        ".vtt": "\n".join(vtt_blocks),
-    }
-    for suffix, content in outputs.items():
-        path = args.output_dir / f"{args.basename}{suffix}"
-        write_text_atomic(path, content)
-        print(path)
+    lrc_path = args.output_dir / f"{args.basename}.lrc"
+    write_text_atomic(lrc_path, lrc)
+    print(lrc_path)
+    for stale_suffix in [".srt", ".vtt"]:
+        (args.output_dir / f"{args.basename}{stale_suffix}").unlink(missing_ok=True)
 
     csv_stream = io.StringIO(newline="")
     writer = csv.writer(csv_stream)
-    writer.writerow(["id", "section", "start_time", "end_time", "lyric"])
+    writer.writerow(["id", "section", "start_time", "lyric"])
     for number, cue in enumerate(cues, 1):
         writer.writerow(
             [
                 f"lyric-{number:02d}",
                 cue.get("section") or "",
                 csv_time(int(cue["start_ms"])),
-                csv_time(int(cue["end_ms"])),
                 cue["text"],
             ]
         )

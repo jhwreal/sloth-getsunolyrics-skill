@@ -21,12 +21,18 @@ import wave
 
 from lyrics_conflict import compare_lyrics_to_video, render_markdown
 from media_utils import require_command, validate_media_pair
+from whisper_alignment import (
+    align_lyrics_to_whisper,
+    select_start_times,
+    transcribe_with_dtw,
+)
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 VISION_SOURCE = SKILL_ROOT / "scripts" / "vision_ocr.swift"
 LYRICS_CONFLICT_SOURCE = SKILL_ROOT / "scripts" / "lyrics_conflict.py"
-PIPELINE_SCHEMA_VERSION = 3
+WHISPER_ALIGNMENT_SOURCE = SKILL_ROOT / "scripts" / "whisper_alignment.py"
+PIPELINE_SCHEMA_VERSION = 4
 OCR_CACHE_VERSION = 2
 SECTION_RE = re.compile(r"^[\[［（(]([^\]］）)]+)[\]］）)]\s*")
 SECTION_ONLY_RE = re.compile(r"^[\[［（(]([^\]］）)]+)[\]］）)]\s*$")
@@ -59,6 +65,7 @@ def pipeline_fingerprint() -> str:
     for path in [
         Path(__file__).resolve(),
         LYRICS_CONFLICT_SOURCE.resolve(),
+        WHISPER_ALIGNMENT_SOURCE.resolve(),
         VISION_SOURCE.resolve(),
     ]:
         digest.update(path.name.encode("utf-8"))
@@ -740,87 +747,32 @@ def vocal_onsets(db: list[float], frame_ms: int, threshold: float) -> list[int]:
     return sorted(onsets)
 
 
-def calibrate(cues: list[dict], db: list[float], frame_ms: int, threshold: float, duration_ms: int) -> list[dict]:
+def calibrate(
+    cues: list[dict],
+    db: list[float],
+    frame_ms: int,
+    threshold: float,
+    duration_ms: int,
+    whisper_matches: list[dict | None],
+) -> list[dict]:
     if not cues:
         raise SystemExit("no aligned lyric cues to calibrate")
     if not db:
         raise SystemExit("vocal activity envelope is empty")
     onsets = vocal_onsets(db, frame_ms, threshold)
-    calibrated = []
-    for index, cue in enumerate(cues):
-        video_start = cue["video_start_ms"]
-        video_frame = min(len(db) - 1, max(0, video_start // frame_ms))
-        nearby_video_energy = max(db[max(0, video_frame - 5) : min(len(db), video_frame + 6)])
-        video_is_active = nearby_video_energy >= threshold
-        search_before = 300
-        search_after = 1800 if index == 0 else (12000 if not video_is_active else 1200)
-        candidates = [item for item in onsets if video_start - search_before <= item <= video_start + search_after]
-        if calibrated:
-            candidates = [item for item in candidates if item > calibrated[-1]["start_ms"] + 200]
-        if index == 0 and video_start < 3000:
-            candidates = [item for item in onsets if item <= min(duration_ms, 30000)]
-        if candidates:
-            forward = [item for item in candidates if item >= video_start - 100]
-            chosen = min(forward, default=min(candidates, key=lambda item: abs(item - video_start)))
-        else:
-            chosen = video_start
-        minimum = calibrated[-1]["start_ms"] + 1 if calibrated else 0
-        maximum = duration_ms - (len(cues) - index)
-        chosen = min(maximum, max(minimum, chosen))
-        if chosen < minimum:
-            raise SystemExit("calibrated lyric starts cannot fit within the media duration")
+    calibrated = select_start_times(
+        cues,
+        whisper_matches,
+        onsets,
+        duration_ms=duration_ms,
+    )
+    for cue in calibrated:
+        chosen = int(cue["start_ms"])
         frame_index = min(len(db) - 1, max(0, chosen // frame_ms))
-        flags = list(cue.get("flags") or [])
-        if not video_is_active:
-            flags.append("low-vocal-energy-at-video-boundary")
         if db[frame_index] < threshold:
-            flags.append("low-vocal-energy-at-start")
-        if abs(chosen - video_start) > 1500:
-            flags.append("large-alignment-shift")
-        calibrated.append(
-            {
-                "index": index + 1,
-                "text": cue["text"],
-                "section": cue.get("section"),
-                "start_ms": int(chosen),
-                "end_ms": 0,
-                "video_start_ms": int(video_start),
-                "text_source": cue.get("text_source", "video_ocr"),
-                "timing_source": "vocal_alignment" if chosen != video_start else "video_highlight",
-                "confidence": round(float(cue["confidence"]), 4),
-                "video_ocr_text": cue.get("video_ocr_text"),
-                "lyrics_video_similarity": cue.get("lyrics_video_similarity"),
-                "flags": flags,
-            }
-        )
-    for index, cue in enumerate(calibrated):
-        if index + 1 < len(calibrated):
-            next_start = calibrated[index + 1]["start_ms"]
-            first_frame = max(0, cue["start_ms"] // frame_ms)
-            last_frame = min(len(db) - 1, max(first_frame, (next_start - 1) // frame_ms))
-            last_active = max(
-                (frame for frame in range(first_frame, last_frame + 1) if db[frame] >= threshold),
-                default=None,
-            )
-            vocal_end = (last_active + 1) * frame_ms if last_active is not None else next_start
-            if cue["start_ms"] < vocal_end <= next_start - 120:
-                cue["end_ms"] = vocal_end
-                cue["end_timing_source"] = "vocal_offset"
-            else:
-                cue["end_ms"] = next_start
-                cue["end_timing_source"] = "next_line_start_fallback"
-        else:
-            last_active = max(
-                (i for i, value in enumerate(db) if value >= threshold), default=None
-            )
-            if last_active is None:
-                cue["end_ms"] = duration_ms
-                cue["end_timing_source"] = "media_duration_fallback"
-            else:
-                cue["end_ms"] = min(
-                    duration_ms, max(cue["start_ms"] + 1, (last_active + 1) * frame_ms)
-                )
-                cue["end_timing_source"] = "vocal_offset"
+            cue["flags"].append("low-vocal-energy-at-start")
+        if abs(chosen - int(cue["video_start_ms"])) > 1500:
+            cue["flags"].append("large-video-to-vocal-shift")
     return calibrated
 
 
@@ -834,6 +786,9 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=0.5, help="OCR sampling interval in seconds")
     parser.add_argument("--work-dir", type=Path, help="persistent intermediate directory")
     parser.add_argument("--keep-work", action="store_true")
+    parser.add_argument("--whisper-cli", type=Path, help="whisper.cpp whisper-cli executable")
+    parser.add_argument("--whisper-model", type=Path, help="local whisper.cpp model")
+    parser.add_argument("--whisper-threads", type=int, help="CPU threads for Whisper DTW")
     parser.add_argument(
         "--lyrics-conflict-resolution",
         choices=["ask", "verified-ocr-error", "use-copied"],
@@ -852,7 +807,7 @@ def main() -> None:
     video_path = args.video.resolve()
     vocals_path = args.vocals.resolve()
     lyrics_path = args.lyrics.resolve()
-    print("[1/6] Validate media streams and durations", file=sys.stderr)
+    print("[1/7] Validate media streams and durations", file=sys.stderr)
     video_info, vocal_info = validate_media_pair(video_path, vocals_path)
     duration_ms = min(video_info["duration_ms"], vocal_info["duration_ms"])
     lyrics = parse_lyrics(lyrics_path)
@@ -864,9 +819,9 @@ def main() -> None:
     else:
         temporary = tempfile.TemporaryDirectory(prefix="sloth-getsunolyrics-")
         work = Path(temporary.name)
-    print(f"[2/6] OCR video frames every {args.interval:.2f}s", file=sys.stderr)
+    print(f"[2/7] OCR video frames every {args.interval:.2f}s", file=sys.stderr)
     frames = extract_ocr(video_path, work, args.interval, args.language)
-    print("[3/6] Compare copied lyrics with unfiltered MP4 lyric anchors", file=sys.stderr)
+    print("[3/7] Compare copied lyrics with unfiltered MP4 lyric anchors", file=sys.stderr)
     raw_video_cues = build_video_cues(frames, round(args.interval * 1000))
     comparison = compare_lyrics_to_video(lyrics, raw_video_cues)
     comparison["lyrics_sha256"] = sha256(lyrics_path)
@@ -903,7 +858,7 @@ def main() -> None:
         print(f"      Read {comparison_markdown}", file=sys.stderr)
         raise SystemExit(3)
 
-    print("[4/6] Build video anchors and align supplied Suno lyrics", file=sys.stderr)
+    print("[4/7] Build video anchors and align supplied Suno lyrics", file=sys.stderr)
     use_unfiltered_video = bool(
         comparison["requires_user_decision"]
         and args.lyrics_conflict_resolution in {"use-copied", "verified-ocr-error"}
@@ -933,9 +888,37 @@ def main() -> None:
         f"      aligned {len(aligned_cues)} lyric lines to {len(video_cues)} video anchors",
         file=sys.stderr,
     )
-    print("[5/6] Analyze isolated-vocal activity and calibrate boundaries", file=sys.stderr)
+    print("[5/7] Run lyric-prompted Whisper DTW token alignment", file=sys.stderr)
+    whisper_transcript, whisper_metadata = transcribe_with_dtw(
+        vocals_path,
+        lyrics,
+        work,
+        language=args.language,
+        whisper_cli=args.whisper_cli,
+        whisper_model=args.whisper_model,
+        threads=args.whisper_threads,
+    )
+    whisper_matches = align_lyrics_to_whisper(
+        lyrics,
+        whisper_transcript,
+        aligned_cues,
+        duration_ms=duration_ms,
+    )
+    print(
+        f"      matched {sum(item is not None for item in whisper_matches)} "
+        f"of {len(lyrics)} lyric lines",
+        file=sys.stderr,
+    )
+    print("[6/7] Check DTW starts against isolated-vocal activity", file=sys.stderr)
     db, frame_ms, threshold = vocal_envelope(vocals_path, work)
-    timeline = calibrate(aligned_cues, db, frame_ms, threshold, duration_ms)
+    timeline = calibrate(
+        aligned_cues,
+        db,
+        frame_ms,
+        threshold,
+        duration_ms,
+        whisper_matches,
+    )
     confirmed_count = sum(
         cue["text_source"] == "suno_lyrics_confirmed_by_video" for cue in timeline
     )
@@ -960,6 +943,7 @@ def main() -> None:
         "ocr_interval_ms": round(args.interval * 1000),
         "ocr_language": args.language,
         "vocal_threshold_db": round(threshold, 2),
+        "whisper_alignment": whisper_metadata,
         "lyrics_comparison": {
             "status": comparison["status"],
             "detected_status": comparison["detected_status"],
@@ -977,12 +961,20 @@ def main() -> None:
             "confirmed_count": confirmed_count,
             "interpolated_count": interpolated_count,
             "conflict_overridden_count": conflict_overridden_count,
+            "whisper_match_count": sum(item is not None for item in whisper_matches),
+            "dtw_token_start_count": sum(
+                cue["timing_source"] == "whisper_dtw_token_start" for cue in timeline
+            ),
+            "rejected_dtw_backtrack_count": sum(
+                "dtw-before-whisper-segment-rejected" in cue.get("flags", [])
+                for cue in timeline
+            ),
             "confirmed_ratio": round(confirmed_count / len(timeline), 4),
         },
         "cues": timeline,
     }
     write_json_atomic(args.output, payload)
-    print(f"[6/6] Wrote {args.output} ({len(timeline)} cues)", file=sys.stderr)
+    print(f"[7/7] Wrote {args.output} ({len(timeline)} cues)", file=sys.stderr)
     if args.keep_work and temporary:
         retained = args.output.with_suffix(".work")
         shutil.copytree(work, retained, dirs_exist_ok=True)
