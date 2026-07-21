@@ -123,6 +123,8 @@ Preserve `work/` until review finishes. It contains OCR frames and observations 
 - Order-align canonical lyric groups with recognized segments. When one segment contains multiple lyric lines, map later line boundaries to the corresponding token inside that segment instead of reusing its first timestamp.
 - Treat recognized words only as timing evidence. Never replace canonical lyrics with Whisper output.
 - Reject a DTW token start that is more than 500 ms before its containing Whisper segment start; that is a detectable alignment backtrack. Refine the raw segment boundary with the nearest forward vocal onset, then preserve the rejection flag.
+- When a weak first-line match skips earlier Whisper segments, retain their earliest DTW evidence and accept it only when an isolated-vocal onset confirms the boundary. This recovers sung intros hidden by transcription hallucinations without trusting the hallucinated words.
+- When consecutive lyric lines receive the same DTW start, treat the earlier line as omitted by Whisper and recover its ordered MP4 anchor instead of collapsing both rows to adjacent milliseconds.
 - Use MP4 timing as a sequence/window prior and audit signal, not as an unconditional fixed offset. Lyrics can be pre-displayed and video transitions can lag the voice.
 - Keep integer milliseconds and strictly increasing starts. The output contract is start-only; do not synthesize end times, SRT, or VTT.
 - Preserve warnings for silence, large shifts, overlays, repeats, harmony, and separation artifacts.

@@ -966,7 +966,16 @@ def main() -> None:
                 cue["timing_source"] == "whisper_dtw_token_start" for cue in timeline
             ),
             "rejected_dtw_backtrack_count": sum(
-                "dtw-before-whisper-segment-rejected" in cue.get("flags", [])
+                cue["timing_source"]
+                == "vocal_onset_after_rejected_dtw_backtrack"
+                for cue in timeline
+            ),
+            "leading_weak_dtw_recovery_count": sum(
+                cue["timing_source"] == "vocal_onset_near_leading_weak_dtw"
+                for cue in timeline
+            ),
+            "duplicate_whisper_start_recovery_count": sum(
+                cue["timing_source"] == "video_anchor_for_duplicate_whisper_start"
                 for cue in timeline
             ),
             "confirmed_ratio": round(confirmed_count / len(timeline), 4),

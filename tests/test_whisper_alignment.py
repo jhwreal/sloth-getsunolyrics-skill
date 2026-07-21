@@ -99,6 +99,85 @@ class WhisperAlignmentTests(unittest.TestCase):
         self.assertEqual(result["start_ms"], 1_000)
         self.assertEqual(result["timing_source"], "whisper_dtw_token_start")
 
+    def test_recovers_weak_first_match_from_leading_dtw_and_vocal_onset(self) -> None:
+        cues = [
+            {
+                "text": "intro line",
+                "section": "Intro",
+                "video_start_ms": 0,
+                "confidence": 1.0,
+                "text_source": "suno_lyrics_confirmed_by_video",
+            }
+        ]
+        matches = [
+            {
+                "dtw_start_ms": 20_000,
+                "raw_start_ms": 20_000,
+                "leading_weak_dtw_start_ms": 2_040,
+                "dtw_available": True,
+                "similarity": 0.4,
+            }
+        ]
+        result = select_start_times(
+            cues,
+            matches,
+            [1_960, 20_200],
+            duration_ms=30_000,
+        )[0]
+        self.assertEqual(result["start_ms"], 1_960)
+        self.assertEqual(
+            result["timing_source"],
+            "vocal_onset_near_leading_weak_dtw",
+        )
+        self.assertIn(
+            "weak-first-whisper-match-recovered-from-leading-dtw",
+            result["flags"],
+        )
+
+    def test_recovers_earlier_line_when_two_lines_share_a_whisper_start(self) -> None:
+        cues = [
+            {
+                "text": "long repeated line",
+                "section": None,
+                "video_start_ms": 154_500,
+                "confidence": 1.0,
+                "text_source": "suno_lyrics_confirmed_by_video",
+            },
+            {
+                "text": "short repeated line",
+                "section": None,
+                "video_start_ms": 160_000,
+                "confidence": 1.0,
+                "text_source": "suno_lyrics_confirmed_by_video",
+            },
+        ]
+        matches = [
+            {
+                "dtw_start_ms": 157_520,
+                "raw_start_ms": 157_120,
+                "dtw_available": True,
+                "similarity": 0.7,
+            },
+            {
+                "dtw_start_ms": 157_520,
+                "raw_start_ms": 157_120,
+                "dtw_available": True,
+                "similarity": 1.0,
+            },
+        ]
+        results = select_start_times(
+            cues,
+            matches,
+            [],
+            duration_ms=170_000,
+        )
+        self.assertEqual(results[0]["start_ms"], 154_500)
+        self.assertEqual(results[1]["start_ms"], 157_520)
+        self.assertIn(
+            "duplicate-whisper-start-recovered-from-video-anchor",
+            results[0]["flags"],
+        )
+
     def test_duplicate_transcript_segment_uses_dtw_time_prior(self) -> None:
         lyrics = [{"text": "same words"}]
         transcript = {

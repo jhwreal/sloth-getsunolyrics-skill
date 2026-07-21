@@ -84,6 +84,7 @@ Codex 不会静默替用户选择，也不会直接把未经画面核对的 OCR 
 - **MP4 画面定粗时间：** OCR 观察当前高亮/滚动的歌词行，并与用户选定的歌词按顺序匹配。
 - **DTW 定精确起点：** 用规范歌词提示本地 whisper.cpp，关闭 Flash Attention 后启用真正的逐字 DTW；识别结果只用于时间，不改歌词正文。
 - **人声否决异常：** 若 DTW 时间回跳到所属 Whisper 句段之前，使用 Lead Vocal onset 否决并修正；不会把普通能量峰值强行替换掉可信的逐字边界。
+- **首行与漏行恢复：** 弱匹配首行必须由前置 DTW 和人声 onset 共同确认；连续歌词若共享同一个 DTW 起点，则用 MP4 顺序锚点恢复被漏掉的前一行。
 - **不确定性可见：** OCR 漏行、文本不一致、静音边界或大幅移动都会写入警告，不静默猜测。
 - **结果可追溯：** 保存源文件哈希、歌词哈希、参数、中间 OCR 结果、置信度和校验报告。
 
@@ -184,6 +185,7 @@ If the MP4 visibly contains different lyrics, final timeline generation pauses a
 - **The MP4 supplies coarse timing:** OCR observes highlighted or scrolling lyric lines and order-aligns them to the user-selected lyrics.
 - **DTW supplies precise starts:** local whisper.cpp runs with the canonical lyric sequence as a prompt and genuine token DTW; recognized words never replace canonical text.
 - **The vocal stem rejects impossible timing:** lead-vocal onsets repair DTW backtracks that fall before their containing Whisper segment without overriding valid token boundaries.
+- **Intro and omitted-line recovery stays evidence-based:** weak first-line matches require agreement between leading DTW and a vocal onset; consecutive lyrics sharing one DTW start recover the omitted earlier row from its ordered MP4 anchor.
 - **Uncertainty stays visible:** missing OCR lines, text mismatches, silent boundaries, and large shifts become review flags.
 - **Outputs are traceable:** source hashes, lyric hashes, parameters, OCR evidence, confidence, and validation are retained.
 

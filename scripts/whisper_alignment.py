@@ -450,6 +450,7 @@ def _align_groups(
                     "similarity": float(similarity),
                     "lyric_count": lyrics_in_group,
                     "segment_count": segments_in_group,
+                    "segment_start_index": prior_segment,
                     "segment_text": "".join(
                         str(item["text"]) for item in segment_group
                     ),
@@ -508,6 +509,7 @@ def align_lyrics_to_whisper(
                     "similarity": float(similarity),
                     "lyric_count": 1,
                     "segment_count": count,
+                    "segment_start_index": segment_index,
                     "segment_text": text,
                 }
                 if count == 1 and (
@@ -524,6 +526,28 @@ def align_lyrics_to_whisper(
         )
         if best and float(best["similarity"]) >= 0.35:
             matched[index] = best
+
+    # Whisper can hallucinate text over a real sung intro, then attach the
+    # canonical first lyric only to a later partial segment. Preserve the
+    # earliest preceding DTW evidence for a weak first-line match so the
+    # selector can confirm it against the isolated-vocal onset.
+    first_match = matched.get(0)
+    if first_match and float(first_match.get("similarity", 0.0)) < 0.5:
+        first_segment_index = int(first_match.get("segment_start_index", 0))
+        for segment in segments[:first_segment_index]:
+            leading_token = next(
+                (
+                    token
+                    for token in segment.get("tokens", [])
+                    if bool(token.get("dtw_available"))
+                ),
+                None,
+            )
+            if leading_token is not None:
+                first_match["leading_weak_dtw_start_ms"] = int(
+                    leading_token["start_ms"]
+                )
+                break
     return [matched.get(index) for index in range(len(lyrics))]
 
 
@@ -550,10 +574,13 @@ def select_start_times(
         dtw_start = None
         raw_start = None
         similarity = None
+        leading_weak_dtw_start = None
         if match:
             dtw_start = int(match["dtw_start_ms"])
             raw_start = int(match["raw_start_ms"])
             similarity = float(match.get("similarity", 0.0))
+            if match.get("leading_weak_dtw_start_ms") is not None:
+                leading_weak_dtw_start = int(match["leading_weak_dtw_start_ms"])
             if similarity < 0.5:
                 flags.append("low-whisper-lyrics-similarity")
             if bool(match.get("dtw_available")):
@@ -587,6 +614,42 @@ def select_start_times(
             chosen = int(refined if refined is not None else video_start)
             flags.append("missing-whisper-lyric-match")
 
+        if (
+            index == 0
+            and similarity is not None
+            and similarity < 0.5
+            and leading_weak_dtw_start is not None
+            and leading_weak_dtw_start < chosen - 1_000
+        ):
+            refined = nearest(vocal_onsets, leading_weak_dtw_start, 1_000)
+            chosen = int(
+                refined if refined is not None else leading_weak_dtw_start
+            )
+            timing_source = "vocal_onset_near_leading_weak_dtw"
+            flags.append("weak-first-whisper-match-recovered-from-leading-dtw")
+
+        next_match = (
+            whisper_matches[index + 1]
+            if index + 1 < len(whisper_matches)
+            else None
+        )
+        if (
+            match
+            and next_match
+            and bool(match.get("dtw_available"))
+            and bool(next_match.get("dtw_available"))
+            and abs(
+                int(match["dtw_start_ms"])
+                - int(next_match["dtw_start_ms"])
+            )
+            <= 20
+            and video_start < chosen - 500
+        ):
+            refined = nearest(vocal_onsets, video_start, 500)
+            chosen = int(refined if refined is not None else video_start)
+            timing_source = "video_anchor_for_duplicate_whisper_start"
+            flags.append("duplicate-whisper-start-recovered-from-video-anchor")
+
         minimum = results[-1]["start_ms"] + 1 if results else 0
         maximum = duration_ms - (len(cues) - index)
         bounded = min(maximum, max(minimum, chosen))
@@ -601,6 +664,7 @@ def select_start_times(
                 "video_start_ms": video_start,
                 "whisper_dtw_start_ms": dtw_start,
                 "whisper_segment_start_ms": raw_start,
+                "whisper_leading_weak_dtw_start_ms": leading_weak_dtw_start,
                 "whisper_lyrics_similarity": (
                     round(similarity, 4) if similarity is not None else None
                 ),

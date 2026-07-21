@@ -188,6 +188,8 @@ def main() -> None:
             summary.get("whisper_match_count") == len(cues),
             int(summary.get("dtw_token_start_count", -1))
             + int(summary.get("rejected_dtw_backtrack_count", -1))
+            + int(summary.get("leading_weak_dtw_recovery_count", -1))
+            + int(summary.get("duplicate_whisper_start_recovery_count", -1))
             == len(cues),
             confirmed_count + interpolated_count + conflict_overridden_count == len(cues),
             summary.get("confirmed_ratio") == round(confirmed_count / len(cues), 4)
