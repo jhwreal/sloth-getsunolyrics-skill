@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>歌词时间轴校对台</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="song-sidebar" aria-label="歌曲选择">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">L</div>
+          <div>
+            <h1>时间轴校对台</h1>
+            <p>逐句确认 · 毫秒微调</p>
+          </div>
+        </div>
+        <div class="sidebar-heading">
+          <span>歌曲列表</span>
+          <span id="songCount" class="count-badge">0</span>
+        </div>
+        <nav id="songList" class="song-list" aria-live="polite"></nav>
+        <div class="sidebar-note">
+          <span class="safe-dot"></span>
+          所有修改只写入本地歌曲包
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="workspace-header">
+          <div>
+            <p class="eyebrow">当前校对</p>
+            <h2 id="songTitle">正在载入歌曲…</h2>
+          </div>
+          <div class="header-actions">
+            <span id="saveState" class="status-pill">未修改</span>
+            <button id="tutorialButton" class="ghost-button" type="button">
+              <span aria-hidden="true">?</span> 使用教程
+            </button>
+          </div>
+        </header>
+
+        <section class="review-card" aria-label="歌词时间轴校对">
+          <div class="player-area">
+            <div class="player-copy">
+              <p>拖动进度条定位开唱瞬间，再把当前播放时间写入选中的歌词。</p>
+              <button id="toggleVideoButton" class="text-button" type="button">显示歌词视频</button>
+            </div>
+
+            <div id="videoWrap" class="video-wrap is-hidden">
+              <video id="media" preload="metadata" playsinline></video>
+            </div>
+
+            <div class="transport">
+              <button id="playButton" class="play-button" type="button" aria-label="播放">
+                <span id="playIcon" aria-hidden="true">▶</span>
+              </button>
+              <div class="transport-main">
+                <div class="time-row">
+                  <span id="currentTime" class="current-time">00:00.000</span>
+                  <span id="durationTime" class="duration-time">00:00.000</span>
+                </div>
+                <input id="seekBar" class="seek-bar" type="range" min="0" max="1" value="0" step="0.001" aria-label="播放进度">
+              </div>
+              <button id="jumpBackButton" class="nudge-button" type="button" title="播放器后退 0.1 秒">−0.1s</button>
+              <button id="jumpForwardButton" class="nudge-button" type="button" title="播放器前进 0.1 秒">+0.1s</button>
+            </div>
+          </div>
+
+          <div class="edit-strip">
+            <div class="selected-copy">
+              <span class="selected-label">当前选中</span>
+              <strong id="selectedLyric">请选择一句歌词</strong>
+            </div>
+            <div class="selected-time-editor">
+              <label for="selectedTimeInput">歌词开始时间</label>
+              <div class="time-input-row">
+                <input id="selectedTimeInput" type="text" inputmode="decimal" value="00:00.000" aria-label="选中歌词开始时间">
+                <button class="mini-button" data-cue-shift="-500" type="button">−0.5s</button>
+                <button class="mini-button" data-cue-shift="-100" type="button">−0.1s</button>
+                <button class="mini-button" data-cue-shift="100" type="button">+0.1s</button>
+                <button class="mini-button" data-cue-shift="500" type="button">+0.5s</button>
+                <button id="applyTypedTimeButton" class="secondary-button" type="button">应用</button>
+              </div>
+            </div>
+            <button id="markTimeButton" class="primary-button mark-button" type="button">
+              <span aria-hidden="true">＋</span> 添加时间点
+            </button>
+          </div>
+
+          <div class="lyrics-heading">
+            <div>
+              <h3>逐句歌词</h3>
+              <p>点击任意歌词，播放器会跳到该句并开始播放。</p>
+            </div>
+            <button id="copyLrcButton" class="ghost-button compact" type="button">复制网易云格式</button>
+          </div>
+
+          <div id="lyricsList" class="lyrics-list" role="listbox" aria-label="歌词时间轴"></div>
+
+          <div class="timeline-footer">
+            <div class="global-adjust">
+              <div>
+                <strong>时间轴整体调整</strong>
+                <span>整首歌词同时前移或后移</span>
+              </div>
+              <div class="global-controls">
+                <button class="mini-button wide" data-global-shift="-100" type="button">整体提前 0.1s</button>
+                <button class="mini-button wide" data-global-shift="100" type="button">整体延后 0.1s</button>
+                <input id="globalShiftInput" type="number" value="0" step="10" aria-label="整体偏移毫秒">
+                <span class="unit">ms</span>
+                <button id="applyGlobalShiftButton" class="secondary-button" type="button">应用偏移</button>
+              </div>
+            </div>
+            <div class="save-actions">
+              <button id="discardButton" class="ghost-button" type="button">撤销未保存修改</button>
+              <button id="saveButton" class="secondary-button strong" type="button">保存进度</button>
+              <button id="finalizeButton" class="primary-button" type="button">确认定版</button>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="tutorialDialog" class="tutorial-dialog">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">五步完成校对</p>
+          <h2>使用教程</h2>
+        </div>
+        <button id="closeTutorialButton" class="close-button" type="button" aria-label="关闭教程">×</button>
+      </div>
+      <img src="/assets/tutorial.svg" alt="歌词时间轴校对台中文使用步骤图">
+      <div class="shortcut-row">
+        <span><kbd>Space</kbd> 播放 / 暂停</span>
+        <span><kbd>←</kbd><kbd>→</kbd> 播放器前后 0.1 秒</span>
+        <span><kbd>Enter</kbd> 写入当前时间</span>
+      </div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

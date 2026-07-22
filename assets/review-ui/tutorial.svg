@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">歌词时间轴校对台使用教程</title>
+  <desc id="desc">依次选择歌曲、点击歌词跳播、拖动进度条、添加时间点、整体微调并定版。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fffafa"/>
+      <stop offset="1" stop-color="#f6f6f8"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#202026" flood-opacity=".12"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0 10 5 0 10Z" fill="#ec4141"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="720" rx="24" fill="url(#bg)"/>
+  <text x="48" y="54" fill="#222228" font-family="PingFang SC, Microsoft YaHei, sans-serif" font-size="26" font-weight="700">五步完成毫秒级歌词校对</text>
+  <text x="48" y="84" fill="#85858d" font-family="PingFang SC, Microsoft YaHei, sans-serif" font-size="14">先听、再定位、最后写入；自动结果始终保留备份。</text>
+
+  <g filter="url(#shadow)">
+    <rect x="48" y="116" width="1104" height="548" rx="18" fill="#fff"/>
+  </g>
+  <rect x="48" y="116" width="218" height="548" rx="18" fill="#fafafd"/>
+  <path d="M266 116V664" stroke="#ececef"/>
+  <circle cx="83" cy="154" r="16" fill="#ec4141"/>
+  <text x="77" y="160" fill="#fff" font-family="sans-serif" font-size="16" font-weight="700">L</text>
+  <text x="110" y="160" fill="#29292e" font-family="PingFang SC, sans-serif" font-size="17" font-weight="700">歌曲列表</text>
+  <g font-family="PingFang SC, sans-serif" font-size="14">
+    <rect x="64" y="190" width="184" height="54" rx="11" fill="#fff0f0"/>
+    <rect x="75" y="201" width="32" height="32" rx="9" fill="#ec4141"/>
+    <text x="83" y="222" fill="#fff" font-size="12" font-weight="700">01</text>
+    <text x="118" y="214" fill="#d73535" font-weight="700">借来的光</text>
+    <text x="118" y="232" fill="#8a8a92" font-size="11">34 句 · 校对中</text>
+    <rect x="64" y="252" width="184" height="54" rx="11" fill="#f3f3f5"/>
+    <text x="78" y="284" fill="#77777f">02</text>
+    <text x="118" y="284" fill="#4d4d53">盒子里的潮汐</text>
+    <rect x="64" y="314" width="184" height="54" rx="11" fill="#f3f3f5"/>
+    <text x="78" y="346" fill="#77777f">03</text>
+    <text x="118" y="346" fill="#4d4d53">把名字写回牌子</text>
+  </g>
+
+  <text x="300" y="156" fill="#222228" font-family="PingFang SC, sans-serif" font-size="20" font-weight="700">借来的光</text>
+  <rect x="300" y="180" width="816" height="96" rx="14" fill="#fafafd" stroke="#ececef"/>
+  <circle cx="342" cy="228" r="22" fill="#ec4141"/>
+  <path d="M336 217 353 228 336 239Z" fill="#fff"/>
+  <text x="380" y="211" fill="#333339" font-family="monospace" font-size="15" font-weight="700">01:08.200</text>
+  <text x="1034" y="211" fill="#aaaab1" font-family="monospace" font-size="13">03:25.640</text>
+  <rect x="380" y="234" width="694" height="5" rx="3" fill="#e5e5e8"/>
+  <rect x="380" y="234" width="278" height="5" rx="3" fill="#ec4141"/>
+  <circle cx="658" cy="236.5" r="8" fill="#ec4141"/>
+
+  <rect x="300" y="294" width="816" height="66" rx="12" fill="#fff6f6" stroke="#f5cccc"/>
+  <text x="322" y="316" fill="#9a9aa2" font-family="PingFang SC, sans-serif" font-size="11">当前选中</text>
+  <text x="322" y="342" fill="#2f2f34" font-family="PingFang SC, sans-serif" font-size="15" font-weight="700">没画出的路</text>
+  <rect x="602" y="309" width="114" height="36" rx="8" fill="#fff" stroke="#dedee3"/>
+  <text x="616" y="332" fill="#333339" font-family="monospace" font-size="13">01:08.200</text>
+  <rect x="936" y="306" width="156" height="42" rx="10" fill="#ec4141"/>
+  <text x="968" y="333" fill="#fff" font-family="PingFang SC, sans-serif" font-size="14" font-weight="700">＋ 添加时间点</text>
+
+  <g font-family="PingFang SC, sans-serif" font-size="14">
+    <rect x="300" y="379" width="816" height="48" fill="#fff"/>
+    <text x="322" y="409" fill="#55555c" font-family="monospace">01:03.120</text>
+    <text x="438" y="409" fill="#3f3f45">容不下心里的雾</text>
+    <rect x="300" y="427" width="816" height="48" fill="#fff0f0"/>
+    <text x="322" y="457" fill="#d73535" font-family="monospace">01:08.200</text>
+    <text x="438" y="457" fill="#d73535" font-weight="700">没画出的路</text>
+    <rect x="300" y="475" width="816" height="48" fill="#fff"/>
+    <text x="322" y="505" fill="#55555c" font-family="monospace">01:10.800</text>
+    <text x="438" y="505" fill="#3f3f45">藏在白雾深处</text>
+  </g>
+  <rect x="300" y="544" width="816" height="84" rx="12" fill="#fafafd" stroke="#ececef"/>
+  <text x="322" y="570" fill="#333339" font-family="PingFang SC, sans-serif" font-size="13" font-weight="700">时间轴整体调整</text>
+  <text x="322" y="591" fill="#8b8b92" font-family="PingFang SC, sans-serif" font-size="11">整首歌词同时提前 / 延后</text>
+  <rect x="791" y="563" width="102" height="34" rx="8" fill="#fff" stroke="#dddde2"/>
+  <text x="809" y="585" fill="#55555c" font-family="PingFang SC, sans-serif" font-size="12">保存进度</text>
+  <rect x="905" y="563" width="102" height="34" rx="8" fill="#ec4141"/>
+  <text x="923" y="585" fill="#fff" font-family="PingFang SC, sans-serif" font-size="12" font-weight="700">确认定版</text>
+
+  <g fill="#ec4141" font-family="PingFang SC, sans-serif" font-size="13" font-weight="700">
+    <circle cx="160" cy="402" r="16" fill="#ec4141"/><text x="156" y="407" fill="#fff">1</text>
+    <text x="74" y="439">左侧选择歌曲</text>
+    <path d="M176 402 C228 402 237 268 309 240" fill="none" stroke="#ec4141" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <circle cx="451" cy="647" r="16" fill="#ec4141"/><text x="447" y="652" fill="#fff">2</text>
+    <text x="477" y="652">点击歌词，立即跳播</text>
+    <path d="M469 635 C510 596 476 518 465 478" fill="none" stroke="#ec4141" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <circle cx="670" cy="131" r="16" fill="#ec4141"/><text x="666" y="136" fill="#fff">3</text>
+    <text x="696" y="136">拖动进度条，找到开唱瞬间</text>
+    <path d="M686 145 C678 167 668 199 659 224" fill="none" stroke="#ec4141" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <circle cx="1100" cy="327" r="16" fill="#ec4141"/><text x="1096" y="332" fill="#fff">4</text>
+    <text x="948" y="382">点击“添加时间点”写入当前时间</text>
+    <path d="M1085 337 C1057 343 1026 341 1005 347" fill="none" stroke="#ec4141" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <circle cx="1086" cy="646" r="16" fill="#ec4141"/><text x="1082" y="651" fill="#fff">5</text>
+    <text x="879" y="652">整体微调后保存并确认定版</text>
+    <path d="M1074 632 C1046 608 1021 591 1008 580" fill="none" stroke="#ec4141" stroke-width="2" marker-end="url(#arrow)"/>
+  </g>
+</svg>

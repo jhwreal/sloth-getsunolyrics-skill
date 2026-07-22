@@ -1,4 +1,4 @@
 interface:
   display_name: "Sloth Get Suno Lyrics"
-  short_description: "Create millisecond-accurate Suno lyric starts"
-  default_prompt: "Use $sloth-getsunolyrics-skill and Computer Use to find my named song in logged-in Suno, copy its lyrics, download its lyric video and lead-vocal stem, explain and pause on any visually confirmed MP4/copied-lyrics conflict, then use local Whisper DTW plus vocal evidence to deliver a validated Netease-style start-only CSV package after my decision."
+  short_description: "Generate and visually fine-tune Suno lyric starts"
+  default_prompt: "Use $sloth-getsunolyrics-skill to build validated Suno lyric timelines, then launch the local multi-song review workbench so I can confirm, fine-tune, and finalize each start time."

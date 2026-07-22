@@ -190,6 +190,7 @@ def main() -> None:
             + int(summary.get("rejected_dtw_backtrack_count", -1))
             + int(summary.get("leading_weak_dtw_recovery_count", -1))
             + int(summary.get("duplicate_whisper_start_recovery_count", -1))
+            + int(summary.get("human_reviewed_start_count", 0))
             == len(cues),
             confirmed_count + interpolated_count + conflict_overridden_count == len(cues),
             summary.get("confirmed_ratio") == round(confirmed_count / len(cues), 4)

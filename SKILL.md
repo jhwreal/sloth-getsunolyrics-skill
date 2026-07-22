@@ -1,6 +1,6 @@
 ---
 name: sloth-getsunolyrics-skill
-description: Use Computer Use to find a named song in the user's logged-in Suno account, copy its lyrics, download its lyric video and Suno-separated lead vocal, detect and explain any difference between the copied lyrics and the words actually shown in the MP4, then generate a validated millisecond start-time CSV plus JSON/LRC after any required user decision. Use when a user wants reusable lyric starts for games, karaoke, editing, or visualization, or when evaluating generated timing against a separate human-reviewed gold timeline.
+description: Use Computer Use to find named songs in the user's logged-in Suno account, copy lyrics, download lyric videos and Suno-separated lead vocals, resolve visible lyric conflicts, generate validated millisecond start-time CSV/JSON/LRC packages, and launch a local multi-song browser workbench for human playback review, per-line timestamp capture, global shifting, saving, and finalization. Use when a user wants reusable lyric starts for games, karaoke, editing, visualization, or a Netease-style timeline confirmation and fine-tuning UI, or when evaluating generated timing against a separate human-reviewed gold timeline.
 ---
 
 # Sloth Get Suno Lyrics
@@ -106,6 +106,7 @@ song-package/
 ├── vocals.separation.json
 ├── manifest.json
 ├── validation.json
+├── review/            # created only after the first manual save
 └── work/
 ```
 
@@ -131,7 +132,7 @@ Preserve `work/` until review finishes. It contains OCR frames and observations 
 
 Read [references/timeline-schema.md](references/timeline-schema.md) before consuming JSON.
 
-## Validate before delivery
+## Validate the generated package
 
 Run:
 
@@ -142,7 +143,38 @@ python3 /absolute/path/to/sloth-getsunolyrics-skill/scripts/validate_package.py 
 
 Confirm the lyrics, MP4, and vocal all belong to the same song; media durations are aligned; CSV/JSON/LRC contain the same text and starts; no interval export remains; starts are legal and strictly increasing; and every warning is reported. A completed package must have `lyrics_comparison.decision_pending == false`. Inspect `alignment_summary`: interpolated lines, conflict-overridden lines, missing Whisper matches, or a low confirmed ratio require human review even when structural validation passes.
 
-If a human-reviewed answer exists, evaluate only after generation:
+## Launch human review and fine-tuning
+
+After all requested songs finish blind generation and package validation, start the local review workbench. Pass each completed package explicitly:
+
+```bash
+python3 /absolute/path/to/sloth-getsunolyrics-skill/scripts/review_timeline.py \
+  --package-dir /absolute/path/song-one-package \
+  --package-dir /absolute/path/song-two-package
+```
+
+For a workspace containing several completed packages, discover them recursively:
+
+```bash
+python3 /absolute/path/to/sloth-getsunolyrics-skill/scripts/review_timeline.py \
+  --packages-root /absolute/path/completed-song-packages
+```
+
+Keep the process running and give the user the printed `http://127.0.0.1:PORT/` address. The page is deliberately loopback-only and has two columns: song switching on the left, and the combined player/lyrics/fine-tuning workbench on the right.
+
+Use the page as follows:
+
+1. Click a lyric to select it, seek the player to its current start, and play.
+2. Drag the player timeline to the audible singing onset.
+3. Click **添加时间点** to assign the current playback millisecond to the selected lyric, or use the per-line ±0.1/0.5 second controls.
+4. Use **时间轴整体调整** only when the whole song has a supported common bias.
+5. Save progress or click **确认定版** after listening through the complete song.
+
+Every save rejects negative, out-of-range, duplicate, or non-increasing starts and detects stale browser revisions. The first save preserves the blind automatic outputs in `review/original/`; edited cues retain `automatic_start_ms` and `automatic_timing_source`, use `human_reviewed_player_position` as the active timing source, regenerate CSV/LRC atomically, and run full package validation when all media inputs are present. Never use a reviewed or manually edited package as generation input for another song.
+
+## Evaluate against independent gold data
+
+If a human-reviewed answer exists, evaluate only after generation and before exposing that answer to the review UI:
 
 ```bash
 python3 /absolute/path/to/sloth-getsunolyrics-skill/scripts/evaluate_timeline.py \

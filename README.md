@@ -63,6 +63,7 @@ git -C "${CODEX_HOME:-$HOME/.codex}/skills/sloth-getsunolyrics-skill" pull --ff-
 6. 若确认 Suno 在 MP4 中改了歌词，列出时间点、复制文本和视频文本，暂停并请用户决定使用哪一版。
 7. 用视频歌词高亮确定粗略顺序，再用歌词提示的 Whisper DTW 逐字时间和人声活动校准演唱起点。
 8. 输出并校验网易云四列格式的 start-only CSV、JSON 和 LRC。
+9. 一首或多首歌曲完成后，启动本地两栏时间轴校对台，让用户在浏览器里边听边逐句确认、微调并定版。
 
 人工核对过的 CSV 或 TypeScript 时间轴只用于最后评测，绝不会作为生成输入。这样可以真实检验 Skill 的效果，避免“偷看答案”。
 
@@ -90,6 +91,22 @@ Codex 不会静默替用户选择，也不会直接把未经画面核对的 OCR 
 
 内部统一使用整数毫秒，只保留每行实际开唱的 `start_ms`。当前维护的精度回归要求每一行绝对误差都不超过 500 ms，而不是只让中位数或 p95 达标。人工答案只会在盲生成完成后用于独立评测，绝不会进入生成 prompt、缓存或候选选择。
 
+### 浏览器校对与微调
+
+完成歌曲包后，可同时载入一首或多首歌：
+
+```bash
+python3 scripts/review_timeline.py \
+  --package-dir /path/to/song-one-package \
+  --package-dir /path/to/song-two-package
+```
+
+也可以用 `--packages-root /path/to/packages` 自动发现其下所有完整歌曲包。服务默认只监听 `http://127.0.0.1:8765/`，不会把歌曲或歌词上传到第三方。
+
+界面采用两栏布局：左侧切换歌曲，右侧把播放器、逐句歌词和所有微调操作放在同一工作区。点击歌词会跳到对应时间并播放；拖到真实开唱瞬间后点击“添加时间点”，即可把播放器当前毫秒写入该句。还支持单句 ±0.1/0.5 秒、整轨偏移、复制网易云毫秒格式、保存进度和确认定版，并内置带中文标注的“使用教程”。
+
+首次保存会把机器生成结果备份到 `review/original/`。保存时严格检查时间范围和递增顺序，保留自动时间证据，原子更新 JSON/CSV/LRC，并在媒体齐全时重新运行完整包校验。
+
 ### 输出目录
 
 ```text
@@ -104,6 +121,7 @@ song-package/
 ├── timeline.lrc
 ├── manifest.json
 ├── validation.json
+├── review/            # 首次人工保存后创建，含原始时间轴备份与校对记录
 └── work/             # OCR 等可复核中间产物
 ```
 
@@ -169,7 +187,7 @@ With Suno logged in, say:
 
 > Use sloth-getsunolyrics-skill for “Song Name” and give me timestamped lyrics as CSV.
 
-Codex finds and verifies the exact version, copies the visible untimed lyrics, downloads the Video and Lead Vocal through Suno's UI, compares the copied lyrics with the words shown in the MP4, order-aligns the video highlights after any required user decision, calibrates line starts with lyric-prompted Whisper DTW plus vocal evidence, and validates start-only CSV/JSON/LRC outputs.
+Codex finds and verifies the exact version, copies the visible untimed lyrics, downloads the Video and Lead Vocal through Suno's UI, compares the copied lyrics with the words shown in the MP4, order-aligns the video highlights after any required user decision, calibrates line starts with lyric-prompted Whisper DTW plus vocal evidence, validates start-only CSV/JSON/LRC outputs, and launches a local multi-song review workbench for playback confirmation and manual finalization.
 
 A human-reviewed CSV or TypeScript timeline is evaluation-only and is never passed into generation.
 
@@ -190,6 +208,20 @@ If the MP4 visibly contains different lyrics, final timeline generation pauses a
 - **Outputs are traceable:** source hashes, lyric hashes, parameters, OCR evidence, confidence, and validation are retained.
 
 Internal timing uses integer milliseconds and retains only each line's actual singing `start_ms`. The maintained regression requires every line—not merely the median or p95—to have absolute start error at or below 500 ms. Reviewed answers are loaded only after blind generation for evaluation and never enter prompts, caches, or candidate selection.
+
+### Browser review and fine-tuning
+
+After one or more packages are complete, launch:
+
+```bash
+python3 scripts/review_timeline.py \
+  --package-dir /path/to/song-one-package \
+  --package-dir /path/to/song-two-package
+```
+
+Use `--packages-root /path/to/packages` to discover completed packages recursively. The service binds only to `http://127.0.0.1:8765/` by default and uploads nothing. Its two-column layout keeps song switching on the left and combines the player, lyric list, selected-line capture, per-line nudges, global shift, saving, and finalization on the right.
+
+Clicking a lyric seeks and plays it. Scrub to the audible onset, then click **添加时间点** to write the player's current millisecond. The first save preserves blind outputs under `review/original/`; every save enforces range and strict ordering, retains automatic timing provenance, atomically regenerates JSON/CSV/LRC, and runs full package validation when the inputs are available.
 
 ### Developer note
 
